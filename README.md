@@ -1,152 +1,166 @@
 # 🚀 TaskFlow Backend API
 
 ![CI](https://github.com/Joaovictoreth1/taskflow-backend-api/actions/workflows/ci.yml/badge.svg)
-![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python)
+![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue?logo=python)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi)
+![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0-red?logo=sqlalchemy)
+![Pydantic](https://img.shields.io/badge/Pydantic-v2-E92063?logo=pydantic)
+![JWT Auth](https://img.shields.io/badge/Auth-JWT%20%2B%20Bcrypt-orange?logo=jsonwebtokens)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-A professional RESTful API for task and project management, built with **FastAPI**, **SQLAlchemy**, and **Pydantic v2**.
+A production-ready RESTful API for task and project management, built with **FastAPI**, **SQLAlchemy 2.0**, **Pydantic v2**, **JWT Authentication (OAuth2 Bearer)**, **Alembic migrations**, and **Docker**.
+
+---
 
 ## 📐 Architecture
 
 ```text
-app/
-├── __init__.py          # Package init
-├── main.py              # FastAPI app, CORS, rate limiting, all routes
-├── database.py          # SQLAlchemy engine & session (SQLite / PostgreSQL)
-├── models.py            # ORM models with relationships
-├── schemas.py           # Pydantic v2 request/response schemas
-└── crud.py              # Database operations (create, read, update, delete)
-
-tests/
-└── test_api.py          # 30+ automated tests with pytest
-
-.github/workflows/
-└── ci.yml               # GitHub Actions CI pipeline
+taskflow-backend-api/
+├── alembic/                 # Database migrations with Alembic
+│   ├── versions/            # Migration revisions
+│   └── env.py               # Migration runtime configuration
+├── app/
+│   ├── __init__.py          # Package init
+│   ├── main.py              # FastAPI app, CORS, SlowAPI rate limiting, routes
+│   ├── database.py          # SQLAlchemy engine & session (SQLite / PostgreSQL)
+│   ├── models.py            # Relational ORM models (User, Student, Profile, Project, Task)
+│   ├── schemas.py           # Pydantic v2 schemas with strict validation & pagination
+│   ├── crud.py              # Isolated database operations
+│   ├── security.py          # Password hashing (bcrypt) & JWT token lifecycle
+│   └── dependencies.py      # OAuth2 Bearer user authentication dependencies
+├── tests/
+│   ├── conftest.py          # Shared test fixtures & SQLite in-memory test database
+│   ├── test_api.py          # Base CRUD & relational integration tests (42 tests)
+│   ├── test_auth.py         # JWT registration, login, protected routes (14 tests)
+│   └── test_tasks_advanced.py # Priorities, due dates, filtering & envelope pagination (15 tests)
+├── .github/workflows/
+│   └── ci.yml               # Automated matrix CI testing across Python 3.11 & 3.12
+├── Dockerfile               # Multi-stage production container image
+├── docker-compose.yml       # Full stack: FastAPI + PostgreSQL 16
+├── requirements.txt         # Pinned production & test dependencies
+├── alembic.ini              # Alembic environment configuration
+├── .env.example             # Example environment variables
+├── .gitignore               # Strict git ignore patterns
+└── README.md                # Project documentation
 ```
 
-## 🗃️ Data Models
+---
 
-| Relationship | Models | Type |
-|---|---|---|
-| Student ↔ Profile | `students` ↔ `profiles` | **One-to-One** |
-| Project → Tasks | `projects` → `tasks` | **One-to-Many** |
+## 🗃️ Data Models & Relationships
 
-### Task Statuses
-- `todo` — Default
-- `in_progress` — Work in progress
-- `done` — Completed
+| Relationship | Models | Cardinality | Key Fields |
+|---|---|---|---|
+| User ➔ Projects | `users` ➔ `projects` | **One-to-Many** | `username`, `email`, `hashed_password`, `is_active` |
+| Student ↔ Profile | `students` ↔ `profiles` | **One-to-One** | `name`, `email`, `bio`, `avatar_url` |
+| Project ➔ Tasks | `projects` ➔ `tasks` | **One-to-Many** | `name`, `description`, `owner_id` |
 
-## 🛠️ Setup
+### Task Attributes
+- **Status:** `todo` (default), `in_progress`, `done`
+- **Priority:** `low`, `medium` (default), `high`, `urgent`
+- **Due Date:** Optional ISO 8601 datetime (`due_date`)
 
-### Prerequisites
-- Python 3.11+
-- pip
+---
 
-### Installation
+## 🔐 Authentication & Security
+
+- **Password Hashing:** Native `bcrypt` with automatic 12-round salt and 72-byte truncation safeguard.
+- **Access Tokens:** Signed HMAC-SHA256 (HS256) JSON Web Tokens with configurable expiration.
+- **Route Protection:** `Depends(get_current_active_user)` dependency enforcing valid Bearer tokens.
+- **Rate Limiting:** `SlowAPI` integration protecting public and auth endpoints against brute force attacks.
+
+---
+
+## 🛠️ Quickstart
+
+### 1. Local Environment Setup
 
 ```bash
 # Clone the repository
 git clone https://github.com/Joaovictoreth1/taskflow-backend-api.git
 cd taskflow-backend-api
 
-# Create virtual environment
+# Create & activate virtual environment
 python -m venv venv
-
-# Activate (Windows)
-venv\Scripts\activate
-
-# Activate (macOS/Linux)
-source venv/bin/activate
+venv\Scripts\activate       # Windows
+source venv/bin/activate    # Linux / macOS
 
 # Install dependencies
 pip install -r requirements.txt
-```
 
-### Configuration
-
-```bash
-# Copy the environment example
+# Configure environment
 cp .env.example .env
-
-# Edit .env to configure your database (default: SQLite)
 ```
 
-### Run the server
+### 2. Database Migrations
 
 ```bash
-uvicorn app.main:app --reload
+# Apply migrations to head
+alembic upgrade head
 ```
 
-The API will be available at `http://localhost:8000`.
-
-## 📖 API Documentation
-
-| Docs | URL |
-|---|---|
-| **Swagger UI** | [http://localhost:8000/docs](http://localhost:8000/docs) |
-| **ReDoc** | [http://localhost:8000/redoc](http://localhost:8000/redoc) |
-
-## 🔗 API Endpoints
-
-### Health
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/` | Root health check |
-| `GET` | `/health` | Health status |
-
-### Students
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/students` | Create a student |
-| `GET` | `/students` | List students (paginated) |
-| `GET` | `/students/{id}` | Get student by ID |
-| `PATCH` | `/students/{id}` | Update student |
-| `DELETE` | `/students/{id}` | Delete student |
-
-### Profiles (1:1 with Student)
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/students/{id}/profile` | Create profile |
-| `PATCH` | `/students/{id}/profile` | Update profile |
-
-### Projects
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/projects` | Create a project |
-| `GET` | `/projects` | List projects (paginated) |
-| `GET` | `/projects/{id}` | Get project with tasks |
-| `PATCH` | `/projects/{id}` | Update project |
-| `DELETE` | `/projects/{id}` | Delete project (cascades tasks) |
-
-### Tasks
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/projects/{id}/tasks` | Create task in project |
-| `GET` | `/projects/{id}/tasks` | List tasks by project |
-| `GET` | `/tasks/{id}` | Get task by ID |
-| `PATCH` | `/tasks/{id}` | Update task |
-| `DELETE` | `/tasks/{id}` | Delete task |
-
-## 🧪 Testing
+### 3. Run Development Server
 
 ```bash
-# Run all tests
+uvicorn app.main:app --reload --port 8000
+```
+
+- Interactive OpenAPI Swagger UI: `http://localhost:8000/docs`
+- ReDoc Documentation: `http://localhost:8000/redoc`
+
+---
+
+## 🐳 Docker & Docker Compose
+
+Run the complete production stack (FastAPI backend + PostgreSQL 16) with a single command:
+
+```bash
+docker compose up -d --build
+```
+
+The API will be available at `http://localhost:8000` with PostgreSQL connected on port `5433`.
+
+---
+
+## 🧪 Automated Testing
+
+The project includes **71 comprehensive integration tests** covering all endpoints, authentication flows, relational cascades, rate limit bypass in test mode, and pagination:
+
+```bash
 pytest tests/ -v
-
-# Run with coverage
-pytest tests/ -v --tb=short
 ```
 
-## 🔒 Features
+---
 
-- **CORS** — Cross-Origin Resource Sharing enabled for all origins
-- **Rate Limiting** — Powered by SlowAPI (30-60 req/min per endpoint)
-- **Validation** — Strict Pydantic v2 schemas with email, length, and enum validation
-- **Cascade Deletes** — Deleting a Student removes their Profile; deleting a Project removes all Tasks
-- **Pagination** — `skip` and `limit` query params on list endpoints
-- **CI/CD** — GitHub Actions runs tests on every push/PR
+## 📡 API Reference Summary
+
+### Authentication
+- `POST /auth/register` — Register a new account (`username`, `email`, `password`)
+- `POST /auth/login` — Login and receive a JWT Bearer token
+- `GET /auth/me` — Retrieve current authenticated user profile
+
+### Projects & Pagination
+- `POST /projects` — Create project (associates with authenticated user if token present)
+- `GET /projects` — List projects (with search query `?search=keyword`)
+- `GET /projects/paginated` — Paginated envelope (`?page=1&size=10`)
+- `GET /projects/{id}` — Get project details including associated tasks
+- `PATCH /projects/{id}` — Update project
+- `DELETE /projects/{id}` — Delete project (cascades to associated tasks)
+
+### Tasks & Filtering
+- `POST /projects/{id}/tasks` — Create task with status, priority, and due date
+- `GET /tasks` — Multi-criteria filter (`?status=done&priority=urgent&search=auth&page=1&size=10`)
+- `GET /tasks/{id}` — Get single task
+- `PATCH /tasks/{id}` — Update task status, priority, or due date
+- `DELETE /tasks/{id}` — Delete task
+
+### Students & Profiles (1:1)
+- `POST /students` — Create student (optional nested profile)
+- `GET /students` — List students
+- `GET /students/{id}` — Get student with profile
+- `POST /students/{id}/profile` — Create profile for student
+- `PATCH /students/{id}/profile` — Update profile
+
+---
 
 ## 📄 License
-
-MIT © João Victor
+This project is open-sourced under the MIT License.

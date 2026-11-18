@@ -16,6 +16,7 @@ build/
 # Database
 *.db
 *.sqlite3
+*.db-journal
 
 # Environment
 .env
@@ -35,3 +36,4 @@ htmlcov/
 .coverage
 .coverage.*
 .pytest_cache/
+
