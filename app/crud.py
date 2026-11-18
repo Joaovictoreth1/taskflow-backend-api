@@ -1,10 +1,62 @@
-"""CRUD operations for all models."""
+"""CRUD operations for all models (Students, Profiles, Projects, Tasks, Users)."""
 
+from typing import Optional
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
+
 from app import models, schemas
+from app.security import hash_password, verify_password
 
 
-# ── Student CRUD ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# USER CRUD (Authentication & Security)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def create_user(db: Session, user: schemas.UserCreate) -> models.User:
+    """Create a new user with bcrypt-hashed password."""
+    db_user = models.User(
+        username=user.username.lower(),
+        email=user.email.lower(),
+        hashed_password=hash_password(user.password),
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+
+def get_user(db: Session, user_id: int) -> models.User | None:
+    return db.query(models.User).filter(models.User.id == user_id).first()
+
+
+def get_user_by_username(db: Session, username: str) -> models.User | None:
+    return db.query(models.User).filter(models.User.username == username.lower()).first()
+
+
+def get_user_by_email(db: Session, email: str) -> models.User | None:
+    return db.query(models.User).filter(models.User.email == email.lower()).first()
+
+
+def authenticate_user(
+    db: Session, username_or_email: str, password: str
+) -> models.User | None:
+    """Authenticate a user by username or email and plaintext password."""
+    identifier = username_or_email.lower().strip()
+    user = (
+        db.query(models.User)
+        .filter(or_(models.User.username == identifier, models.User.email == identifier))
+        .first()
+    )
+    if not user:
+        return None
+    if not verify_password(password, user.hashed_password):
+        return None
+    return user
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STUDENT CRUD
+# ══════════════════════════════════════════════════════════════════════════════
 
 def create_student(db: Session, student: schemas.StudentCreate) -> models.Student:
     db_student = models.Student(name=student.name, email=student.email)
@@ -61,7 +113,9 @@ def delete_student(db: Session, student_id: int) -> bool:
     return True
 
 
-# ── Profile CRUD ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# PROFILE CRUD
+# ══════════════════════════════════════════════════════════════════════════════
 
 def create_profile(
     db: Session, student_id: int, profile: schemas.ProfileCreate
@@ -97,10 +151,18 @@ def update_profile(
     return db_student.profile
 
 
-# ── Project CRUD ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# PROJECT CRUD
+# ══════════════════════════════════════════════════════════════════════════════
 
-def create_project(db: Session, project: schemas.ProjectCreate) -> models.Project:
-    db_project = models.Project(name=project.name, description=project.description)
+def create_project(
+    db: Session, project: schemas.ProjectCreate, owner_id: Optional[int] = None
+) -> models.Project:
+    db_project = models.Project(
+        name=project.name,
+        description=project.description,
+        owner_id=owner_id,
+    )
     db.add(db_project)
     db.commit()
     db.refresh(db_project)
@@ -111,8 +173,30 @@ def get_project(db: Session, project_id: int) -> models.Project | None:
     return db.query(models.Project).filter(models.Project.id == project_id).first()
 
 
-def get_projects(db: Session, skip: int = 0, limit: int = 100) -> list[models.Project]:
-    return db.query(models.Project).offset(skip).limit(limit).all()
+def get_projects(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    search: Optional[str] = None,
+    owner_id: Optional[int] = None,
+) -> list[models.Project]:
+    query = db.query(models.Project)
+    if owner_id is not None:
+        query = query.filter(models.Project.owner_id == owner_id)
+    if search:
+        query = query.filter(models.Project.name.ilike(f"%{search}%"))
+    return query.offset(skip).limit(limit).all()
+
+
+def count_projects(
+    db: Session, search: Optional[str] = None, owner_id: Optional[int] = None
+) -> int:
+    query = db.query(models.Project)
+    if owner_id is not None:
+        query = query.filter(models.Project.owner_id == owner_id)
+    if search:
+        query = query.filter(models.Project.name.ilike(f"%{search}%"))
+    return query.count()
 
 
 def update_project(
@@ -140,7 +224,9 @@ def delete_project(db: Session, project_id: int) -> bool:
     return True
 
 
-# ── Task CRUD ────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# TASK CRUD
+# ══════════════════════════════════════════════════════════════════════════════
 
 def create_task(
     db: Session, project_id: int, task: schemas.TaskCreate
@@ -154,6 +240,8 @@ def create_task(
         title=task.title,
         description=task.description,
         status=models.TaskStatus(task.status),
+        priority=models.TaskPriority(task.priority),
+        due_date=task.due_date,
     )
     db.add(db_task)
     db.commit()
@@ -177,6 +265,37 @@ def get_tasks_by_project(
     )
 
 
+def filter_tasks(
+    db: Session,
+    project_id: Optional[int] = None,
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    search: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+) -> tuple[list[models.Task], int]:
+    """Filter tasks with multiple criteria and return both items and total count."""
+    query = db.query(models.Task)
+
+    if project_id is not None:
+        query = query.filter(models.Task.project_id == project_id)
+    if status is not None:
+        query = query.filter(models.Task.status == models.TaskStatus(status))
+    if priority is not None:
+        query = query.filter(models.Task.priority == models.TaskPriority(priority))
+    if search:
+        query = query.filter(
+            or_(
+                models.Task.title.ilike(f"%{search}%"),
+                models.Task.description.ilike(f"%{search}%"),
+            )
+        )
+
+    total = query.count()
+    items = query.order_by(models.Task.id.desc()).offset(skip).limit(limit).all()
+    return items, total
+
+
 def update_task(
     db: Session, task_id: int, task: schemas.TaskUpdate
 ) -> models.Task | None:
@@ -188,6 +307,8 @@ def update_task(
     for key, value in update_data.items():
         if key == "status" and value is not None:
             value = models.TaskStatus(value)
+        elif key == "priority" and value is not None:
+            value = models.TaskPriority(value)
         setattr(db_task, key, value)
 
     db.commit()

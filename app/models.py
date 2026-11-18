@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, Integer, String, Text, ForeignKey, DateTime, Enum as SAEnum
+    Column, Integer, String, Text, ForeignKey, DateTime, Boolean, Enum as SAEnum
 )
 from sqlalchemy.orm import relationship
 import enum
@@ -15,6 +15,35 @@ class TaskStatus(str, enum.Enum):
     TODO = "todo"
     IN_PROGRESS = "in_progress"
     DONE = "done"
+
+
+class TaskPriority(str, enum.Enum):
+    """Enum for task priority levels."""
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    URGENT = "urgent"
+
+
+# ── User (Authentication & Ownership) ────────────────────────────────────────
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(50), unique=True, nullable=False, index=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    hashed_password = Column(String(255), nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    is_superuser = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    projects = relationship(
+        "Project", back_populates="owner", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return f"<User(id={self.id}, username='{self.username}', email='{self.email}')>"
 
 
 # ── Student ↔ Profile (One-to-One) ──────────────────────────────────────────
@@ -59,14 +88,18 @@ class Project(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(200), nullable=False)
     description = Column(Text, default="")
+    owner_id = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+    owner = relationship("User", back_populates="projects")
     tasks = relationship(
         "Task", back_populates="project", cascade="all, delete-orphan"
     )
 
     def __repr__(self) -> str:
-        return f"<Project(id={self.id}, name='{self.name}')>"
+        return f"<Project(id={self.id}, name='{self.name}', owner_id={self.owner_id})>"
 
 
 class Task(Base):
@@ -74,7 +107,7 @@ class Task(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     project_id = Column(
-        Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
     title = Column(String(300), nullable=False)
     description = Column(Text, default="")
@@ -82,10 +115,21 @@ class Task(Base):
         SAEnum(TaskStatus, values_callable=lambda x: [e.value for e in x]),
         default=TaskStatus.TODO,
         nullable=False,
+        index=True,
     )
+    priority = Column(
+        SAEnum(TaskPriority, values_callable=lambda x: [e.value for e in x]),
+        default=TaskPriority.MEDIUM,
+        nullable=False,
+        index=True,
+    )
+    due_date = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     project = relationship("Project", back_populates="tasks")
 
     def __repr__(self) -> str:
-        return f"<Task(id={self.id}, title='{self.title}', status='{self.status}')>"
+        return (
+            f"<Task(id={self.id}, title='{self.title}', status='{self.status}', "
+            f"priority='{self.priority}')>"
+        )
