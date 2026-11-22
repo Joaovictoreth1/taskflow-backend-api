@@ -243,3 +243,65 @@ class ProjectResponse(ProjectBase):
     owner_id: Optional[int] = None
     created_at: datetime
     tasks: list[TaskResponse] = []
+
+
+# ── Task Comment Schemas ─────────────────────────────────────────────────────
+
+class TaskCommentCreate(BaseModel):
+    content: str = Field(..., min_length=1, max_length=2000)
+
+
+class TaskCommentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    task_id: int
+    user_id: Optional[int] = None
+    author_name: str
+    content: str
+    created_at: datetime
+
+
+# ── Password & Profile Management ────────────────────────────────────────────
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=6, max_length=128)
+
+
+class UpdateProfileRequest(BaseModel):
+    email: Optional[str] = Field(default=None, max_length=255)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+        if not re.match(pattern, v):
+            raise ValueError("Invalid email format")
+        return v.lower().strip()
+
+
+# ── Analytics & Statistics Schemas ───────────────────────────────────────────
+
+class AnalyticsOverviewResponse(BaseModel):
+    total_projects: int
+    total_tasks: int
+    completed_tasks: int
+    in_progress_tasks: int
+    todo_tasks: int
+    overdue_tasks: int
+    completion_rate_percent: float
+    tasks_by_priority: dict[str, int]
+    tasks_by_status: dict[str, int]
+
+
+class ProjectStatsResponse(BaseModel):
+    project_id: int
+    project_name: str
+    total_tasks: int
+    completed_tasks: int
+    in_progress_tasks: int
+    todo_tasks: int
+    completion_rate_percent: float

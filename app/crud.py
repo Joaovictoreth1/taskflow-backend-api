@@ -1,8 +1,9 @@
 """CRUD operations for all models (Students, Profiles, Projects, Tasks, Users)."""
 
 from typing import Optional
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 
 from app import models, schemas
 from app.security import hash_password, verify_password
@@ -323,3 +324,147 @@ def delete_task(db: Session, task_id: int) -> bool:
     db.delete(db_task)
     db.commit()
     return True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# USER PROFILE & PASSWORD CRUD
+# ══════════════════════════════════════════════════════════════════════════════
+
+def change_user_password(db: Session, user: models.User, new_password: str) -> None:
+    """Update user password with new bcrypt hash."""
+    user.hashed_password = hash_password(new_password)
+    db.commit()
+    db.refresh(user)
+
+
+def update_user_email(db: Session, user: models.User, new_email: str) -> models.User:
+    """Update user email address."""
+    user.email = new_email.lower().strip()
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TASK COMMENTS CRUD
+# ══════════════════════════════════════════════════════════════════════════════
+
+def create_task_comment(
+    db: Session,
+    task_id: int,
+    comment: schemas.TaskCommentCreate,
+    user: Optional[models.User] = None,
+    guest_name: str = "Anonymous",
+) -> models.TaskComment | None:
+    """Create a new comment on a task."""
+    task = get_task(db, task_id)
+    if not task:
+        return None
+
+    author = user.username if user else guest_name
+    user_id = user.id if user else None
+
+    db_comment = models.TaskComment(
+        task_id=task_id,
+        user_id=user_id,
+        author_name=author,
+        content=comment.content.strip(),
+    )
+    db.add(db_comment)
+    db.commit()
+    db.refresh(db_comment)
+    return db_comment
+
+
+def get_task_comments(db: Session, task_id: int) -> list[models.TaskComment]:
+    """Retrieve all comments for a task ordered chronologically."""
+    return (
+        db.query(models.TaskComment)
+        .filter(models.TaskComment.task_id == task_id)
+        .order_by(models.TaskComment.id.asc())
+        .all()
+    )
+
+
+def delete_task_comment(db: Session, comment_id: int) -> bool:
+    """Delete a comment by ID."""
+    comment = db.query(models.TaskComment).filter(models.TaskComment.id == comment_id).first()
+    if not comment:
+        return False
+    db.delete(comment)
+    db.commit()
+    return True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ANALYTICS & STATISTICS CRUD
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_analytics_overview(db: Session) -> dict:
+    """Compute global task management analytics and KPIs."""
+    total_projects = db.query(models.Project).count()
+    all_tasks = db.query(models.Task).all()
+    total_tasks = len(all_tasks)
+
+    tasks_by_status = {"todo": 0, "in_progress": 0, "done": 0}
+    tasks_by_priority = {"low": 0, "medium": 0, "high": 0, "urgent": 0}
+
+    now = datetime.now(timezone.utc)
+    overdue_count = 0
+
+    for task in all_tasks:
+        s_val = task.status.value if hasattr(task.status, "value") else str(task.status)
+        p_val = task.priority.value if hasattr(task.priority, "value") else str(task.priority)
+
+        if s_val in tasks_by_status:
+            tasks_by_status[s_val] += 1
+        if p_val in tasks_by_priority:
+            tasks_by_priority[p_val] += 1
+
+        if task.due_date:
+            due = task.due_date
+            if due.tzinfo is None:
+                due = due.replace(tzinfo=timezone.utc)
+            if due < now and s_val != "done":
+                overdue_count += 1
+
+    completed = tasks_by_status["done"]
+    in_progress = tasks_by_status["in_progress"]
+    todo = tasks_by_status["todo"]
+    completion_rate = round((completed / total_tasks) * 100, 2) if total_tasks > 0 else 0.0
+
+    return {
+        "total_projects": total_projects,
+        "total_tasks": total_tasks,
+        "completed_tasks": completed,
+        "in_progress_tasks": in_progress,
+        "todo_tasks": todo,
+        "overdue_tasks": overdue_count,
+        "completion_rate_percent": completion_rate,
+        "tasks_by_priority": tasks_by_priority,
+        "tasks_by_status": tasks_by_status,
+    }
+
+
+def get_project_stats(db: Session, project_id: int) -> dict | None:
+    """Compute metrics for a specific project."""
+    project = get_project(db, project_id)
+    if not project:
+        return None
+
+    tasks = project.tasks
+    total = len(tasks)
+    completed = sum(1 for t in tasks if (t.status.value if hasattr(t.status, "value") else str(t.status)) == "done")
+    in_progress = sum(1 for t in tasks if (t.status.value if hasattr(t.status, "value") else str(t.status)) == "in_progress")
+    todo = sum(1 for t in tasks if (t.status.value if hasattr(t.status, "value") else str(t.status)) == "todo")
+    rate = round((completed / total) * 100, 2) if total > 0 else 0.0
+
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        "total_tasks": total,
+        "completed_tasks": completed,
+        "in_progress_tasks": in_progress,
+        "todo_tasks": todo,
+        "completion_rate_percent": rate,
+    }

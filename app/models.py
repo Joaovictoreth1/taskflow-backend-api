@@ -127,9 +127,35 @@ class Task(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     project = relationship("Project", back_populates="tasks")
+    comments = relationship(
+        "TaskComment", back_populates="task", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return (
             f"<Task(id={self.id}, title='{self.title}', status='{self.status}', "
             f"priority='{self.priority}')>"
         )
+
+
+# ── Task Comments (Discussion & Collaboration) ──────────────────────────────
+
+class TaskComment(Base):
+    __tablename__ = "task_comments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    task_id = Column(
+        Integer, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    author_name = Column(String(100), nullable=False)
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    task = relationship("Task", back_populates="comments")
+    user = relationship("User")
+
+    def __repr__(self) -> str:
+        return f"<TaskComment(id={self.id}, task_id={self.task_id}, author='{self.author_name}')>"

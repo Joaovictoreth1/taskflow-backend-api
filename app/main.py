@@ -2,7 +2,7 @@
 
 from math import ceil
 from typing import Optional
-from fastapi import FastAPI, Depends, HTTPException, Query, Request, status
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -160,6 +160,53 @@ def get_me(
 ):
     """Get current authenticated user profile."""
     return current_user
+
+
+@app.patch(
+    "/auth/me",
+    response_model=schemas.UserResponse,
+    tags=["Authentication"],
+)
+@limiter.limit("20/minute")
+def update_me(
+    request: Request,
+    profile_in: schemas.UpdateProfileRequest,
+    current_user: models.User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Update current user profile (email)."""
+    if profile_in.email and profile_in.email != current_user.email:
+        existing = crud.get_user_by_email(db, profile_in.email)
+        if existing and existing.id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already in use",
+            )
+        current_user = crud.update_user_email(db, current_user, profile_in.email)
+    return current_user
+
+
+@app.post(
+    "/auth/change-password",
+    status_code=status.HTTP_200_OK,
+    tags=["Authentication"],
+)
+@limiter.limit("10/minute")
+def change_password(
+    request: Request,
+    payload: schemas.ChangePasswordRequest,
+    current_user: models.User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Change current authenticated user password."""
+    from app.security import verify_password
+    if not verify_password(payload.old_password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Incorrect old password",
+        )
+    crud.change_user_password(db, current_user, payload.new_password)
+    return {"status": "ok", "message": "Password updated successfully"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -462,3 +509,139 @@ def update_task(
 def delete_task(request: Request, task_id: int, db: Session = Depends(get_db)):
     if not crud.delete_task(db, task_id):
         raise HTTPException(status_code=404, detail="Task not found")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TASK COMMENTS ROUTES
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post(
+    "/tasks/{task_id}/comments",
+    response_model=schemas.TaskCommentResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Task Comments"],
+)
+@limiter.limit("30/minute")
+def create_comment(
+    request: Request,
+    task_id: int,
+    comment_in: schemas.TaskCommentCreate,
+    current_user: Optional[models.User] = Depends(get_optional_user),
+    db: Session = Depends(get_db),
+):
+    """Post a comment on a specific task."""
+    result = crud.create_task_comment(db, task_id, comment_in, user=current_user)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return result
+
+
+@app.get(
+    "/tasks/{task_id}/comments",
+    response_model=list[schemas.TaskCommentResponse],
+    tags=["Task Comments"],
+)
+@limiter.limit("60/minute")
+def list_comments(
+    request: Request,
+    task_id: int,
+    db: Session = Depends(get_db),
+):
+    """List all comments on a specific task."""
+    if not crud.get_task(db, task_id):
+        raise HTTPException(status_code=404, detail="Task not found")
+    return crud.get_task_comments(db, task_id)
+
+
+@app.delete(
+    "/tasks/{task_id}/comments/{comment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["Task Comments"],
+)
+@limiter.limit("30/minute")
+def delete_comment(
+    request: Request,
+    task_id: int,
+    comment_id: int,
+    db: Session = Depends(get_db),
+):
+    """Delete a comment from a task."""
+    if not crud.delete_task_comment(db, comment_id):
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ANALYTICS & STATS ROUTES
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get(
+    "/analytics/overview",
+    response_model=schemas.AnalyticsOverviewResponse,
+    tags=["Analytics"],
+)
+@limiter.limit("60/minute")
+def get_analytics_overview(request: Request, db: Session = Depends(get_db)):
+    """Global system-wide task management analytics, KPIs and completion rates."""
+    return crud.get_analytics_overview(db)
+
+
+@app.get(
+    "/projects/{project_id}/stats",
+    response_model=schemas.ProjectStatsResponse,
+    tags=["Analytics"],
+)
+@limiter.limit("60/minute")
+def get_project_stats(
+    request: Request,
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """Project-specific metrics, breakdown by status, and completion rate."""
+    stats = crud.get_project_stats(db, project_id)
+    if not stats:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return stats
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROJECT EXPORT ROUTES
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get(
+    "/projects/{project_id}/export/csv",
+    tags=["Projects"],
+    summary="Export project tasks to CSV",
+)
+@limiter.limit("20/minute")
+def export_project_tasks_csv(
+    request: Request,
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """Generate and download a CSV file of all tasks in a project."""
+    import csv
+    import io
+
+    project = crud.get_project(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["ID", "Title", "Status", "Priority", "Due Date", "Created At", "Description"])
+
+    for task in project.tasks:
+        s_val = task.status.value if hasattr(task.status, "value") else str(task.status)
+        p_val = task.priority.value if hasattr(task.priority, "value") else str(task.priority)
+        due = task.due_date.isoformat() if task.due_date else ""
+        created = task.created_at.isoformat() if task.created_at else ""
+        writer.writerow([task.id, task.title, s_val, p_val, due, created, task.description])
+
+    csv_data = output.getvalue()
+    filename = f"project_{project_id}_tasks.csv"
+
+    return Response(
+        content=csv_data,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )

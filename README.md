@@ -32,7 +32,8 @@ taskflow-backend-api/
 │   ├── conftest.py          # Shared test fixtures & SQLite in-memory test database
 │   ├── test_api.py          # Base CRUD & relational integration tests (42 tests)
 │   ├── test_auth.py         # JWT registration, login, protected routes (14 tests)
-│   └── test_tasks_advanced.py # Priorities, due dates, filtering & envelope pagination (15 tests)
+│   ├── test_tasks_advanced.py # Priorities, due dates, filtering & envelope pagination (15 tests)
+│   └── test_analytics_and_comments.py # Analytics, task comments, CSV export & password updates (16 tests)
 ├── .github/workflows/
 │   └── ci.yml               # Automated matrix CI testing across Python 3.11 & 3.12
 ├── Dockerfile               # Multi-stage production container image
@@ -53,6 +54,7 @@ taskflow-backend-api/
 | User ➔ Projects | `users` ➔ `projects` | **One-to-Many** | `username`, `email`, `hashed_password`, `is_active` |
 | Student ↔ Profile | `students` ↔ `profiles` | **One-to-One** | `name`, `email`, `bio`, `avatar_url` |
 | Project ➔ Tasks | `projects` ➔ `tasks` | **One-to-Many** | `name`, `description`, `owner_id` |
+| Task ➔ Comments | `tasks` ➔ `task_comments` | **One-to-Many** | `author_name`, `content`, `user_id` |
 
 ### Task Attributes
 - **Status:** `todo` (default), `in_progress`, `done`

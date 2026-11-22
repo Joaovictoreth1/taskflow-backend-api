@@ -66,3 +66,4 @@ def get_optional_user(
     if not username:
         return None
     return crud.get_user_by_username(db, username=username)
+
