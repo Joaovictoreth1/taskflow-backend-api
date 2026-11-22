@@ -25,6 +25,17 @@ Base.metadata.create_all(bind=engine)
 limiter = Limiter(key_func=get_remote_address)
 
 # ── FastAPI App ──────────────────────────────────────────────────────────────
+tags_metadata = [
+    {"name": "Health", "description": "Liveness and readiness health-check probes."},
+    {"name": "Authentication", "description": "JWT OAuth2 user registration, login, profile, and password rotation."},
+    {"name": "Projects", "description": "Project workspace management, pagination, ownership, and CSV export."},
+    {"name": "Tasks", "description": "Task creation, priority levels, due dates, multi-field filtering, and status updates."},
+    {"name": "Task Comments", "description": "Collaboration comments and discussion threads on tasks."},
+    {"name": "Analytics", "description": "System-wide and project-specific KPIs, completion rates, and overdue metrics."},
+    {"name": "Students", "description": "Academic student records management."},
+    {"name": "Profiles", "description": "One-to-one student profiles (bio, avatar)."},
+]
+
 app = FastAPI(
     title="TaskFlow API",
     description=(
@@ -32,9 +43,10 @@ app = FastAPI(
         "with JWT authentication, relational ORM, strict Pydantic validation, "
         "and advanced filtering/pagination."
     ),
-    version="2.0.0",
+    version="2.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    openapi_tags=tags_metadata,
 )
 
 app.state.limiter = limiter
