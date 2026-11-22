@@ -33,9 +33,11 @@ taskflow-backend-api/
 │   ├── test_api.py          # Base CRUD & relational integration tests (42 tests)
 │   ├── test_auth.py         # JWT registration, login, protected routes (14 tests)
 │   ├── test_tasks_advanced.py # Priorities, due dates, filtering & envelope pagination (15 tests)
-│   └── test_analytics_and_comments.py # Analytics, task comments, CSV export & password updates (16 tests)
+│   ├── test_analytics_and_comments.py # Analytics, task comments, CSV export & password updates (16 tests)
+│   └── test_tags_and_assignment.py # Tags many-to-many, task assignment, /tasks/my-tasks (14 tests)
 ├── .github/workflows/
 │   └── ci.yml               # Automated matrix CI testing across Python 3.11 & 3.12
+├── seed.py                  # Database seeder for demo users, projects, tasks, and tags
 ├── Dockerfile               # Multi-stage production container image
 ├── docker-compose.yml       # Full stack: FastAPI + PostgreSQL 16
 ├── requirements.txt         # Pinned production & test dependencies
@@ -55,6 +57,8 @@ taskflow-backend-api/
 | Student ↔ Profile | `students` ↔ `profiles` | **One-to-One** | `name`, `email`, `bio`, `avatar_url` |
 | Project ➔ Tasks | `projects` ➔ `tasks` | **One-to-Many** | `name`, `description`, `owner_id` |
 | Task ➔ Comments | `tasks` ➔ `task_comments` | **One-to-Many** | `author_name`, `content`, `user_id` |
+| Task ↔ Tags | `tasks` ↔ `tags` | **Many-to-Many** | `name`, `color` via `task_tags` table |
+| User ➔ Assigned Tasks | `users` ➔ `tasks` | **One-to-Many** | `assignee_id` |
 
 ### Task Attributes
 - **Status:** `todo` (default), `in_progress`, `done`

@@ -30,6 +30,7 @@ tags_metadata = [
     {"name": "Authentication", "description": "JWT OAuth2 user registration, login, profile, and password rotation."},
     {"name": "Projects", "description": "Project workspace management, pagination, ownership, and CSV export."},
     {"name": "Tasks", "description": "Task creation, priority levels, due dates, multi-field filtering, and status updates."},
+    {"name": "Tags", "description": "Color-coded tags and labels for categorizing tasks."},
     {"name": "Task Comments", "description": "Collaboration comments and discussion threads on tasks."},
     {"name": "Analytics", "description": "System-wide and project-specific KPIs, completion rates, and overdue metrics."},
     {"name": "Students", "description": "Academic student records management."},
@@ -457,6 +458,41 @@ def list_tasks_by_project(
 
 
 @app.get(
+    "/tasks/my-tasks",
+    response_model=schemas.PaginatedResponse[schemas.TaskResponse],
+    tags=["Tasks"],
+)
+@limiter.limit("60/minute")
+def list_my_tasks(
+    request: Request,
+    page: int = Query(1, ge=1, description="Page number"),
+    size: int = Query(10, ge=1, le=100, description="Items per page"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    priority: Optional[str] = Query(None, description="Filter by priority"),
+    current_user: models.User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Retrieve tasks assigned to the currently authenticated user."""
+    skip = (page - 1) * size
+    items, total = crud.filter_tasks(
+        db,
+        assignee_id=current_user.id,
+        status=status,
+        priority=priority,
+        skip=skip,
+        limit=size,
+    )
+    pages = ceil(total / size) if size > 0 else 0
+    return schemas.PaginatedResponse(
+        items=items,
+        total=total,
+        page=page,
+        size=size,
+        pages=pages,
+    )
+
+
+@app.get(
     "/tasks",
     response_model=schemas.PaginatedResponse[schemas.TaskResponse],
     tags=["Tasks"],
@@ -467,9 +503,11 @@ def list_all_tasks(
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(10, ge=1, le=100, description="Items per page"),
     project_id: Optional[int] = Query(None, description="Filter by project ID"),
+    assignee_id: Optional[int] = Query(None, description="Filter by assignee user ID"),
     status: Optional[str] = Query(None, description="Filter by status (todo, in_progress, done)"),
     priority: Optional[str] = Query(None, description="Filter by priority (low, medium, high, urgent)"),
     search: Optional[str] = Query(None, description="Search in title or description"),
+    tag: Optional[str] = Query(None, description="Filter by tag name"),
     db: Session = Depends(get_db),
 ):
     """Global task query with multi-field filtering and paginated envelope."""
@@ -477,9 +515,11 @@ def list_all_tasks(
     items, total = crud.filter_tasks(
         db,
         project_id=project_id,
+        assignee_id=assignee_id,
         status=status,
         priority=priority,
         search=search,
+        tag=tag,
         skip=skip,
         limit=size,
     )
@@ -580,6 +620,89 @@ def delete_comment(
     """Delete a comment from a task."""
     if not crud.delete_task_comment(db, comment_id):
         raise HTTPException(status_code=404, detail="Comment not found")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAG ROUTES (Labels & Categories)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post(
+    "/tags",
+    response_model=schemas.TagResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Tags"],
+)
+@limiter.limit("30/minute")
+def create_tag(
+    request: Request,
+    tag_in: schemas.TagCreate,
+    db: Session = Depends(get_db),
+):
+    """Create a new tag/label with a hex color code."""
+    if crud.get_tag_by_name(db, tag_in.name):
+        raise HTTPException(status_code=400, detail="Tag already exists")
+    return crud.create_tag(db, tag_in)
+
+
+@app.get(
+    "/tags",
+    response_model=list[schemas.TagResponse],
+    tags=["Tags"],
+)
+@limiter.limit("60/minute")
+def list_tags(request: Request, db: Session = Depends(get_db)):
+    """List all available tags."""
+    return crud.get_tags(db)
+
+
+@app.delete(
+    "/tags/{tag_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["Tags"],
+)
+@limiter.limit("30/minute")
+def delete_tag(request: Request, tag_id: int, db: Session = Depends(get_db)):
+    """Delete a tag globally."""
+    if not crud.delete_tag(db, tag_id):
+        raise HTTPException(status_code=404, detail="Tag not found")
+
+
+@app.post(
+    "/tasks/{task_id}/tags/{tag_id}",
+    response_model=schemas.TaskResponse,
+    tags=["Tags"],
+)
+@limiter.limit("30/minute")
+def assign_tag_to_task(
+    request: Request,
+    task_id: int,
+    tag_id: int,
+    db: Session = Depends(get_db),
+):
+    """Associate a tag with a task."""
+    result = crud.add_tag_to_task(db, task_id, tag_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Task or Tag not found")
+    return result
+
+
+@app.delete(
+    "/tasks/{task_id}/tags/{tag_id}",
+    response_model=schemas.TaskResponse,
+    tags=["Tags"],
+)
+@limiter.limit("30/minute")
+def remove_tag_from_task(
+    request: Request,
+    task_id: int,
+    tag_id: int,
+    db: Session = Depends(get_db),
+):
+    """Disassociate a tag from a task."""
+    result = crud.remove_tag_from_task(db, task_id, tag_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Task or Tag not found")
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════

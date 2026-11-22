@@ -238,12 +238,18 @@ def create_task(
 
     db_task = models.Task(
         project_id=project_id,
+        assignee_id=task.assignee_id,
         title=task.title,
         description=task.description,
         status=models.TaskStatus(task.status),
         priority=models.TaskPriority(task.priority),
         due_date=task.due_date,
     )
+
+    if getattr(task, "tag_ids", None):
+        tags = db.query(models.Tag).filter(models.Tag.id.in_(task.tag_ids)).all()
+        db_task.tags = tags
+
     db.add(db_task)
     db.commit()
     db.refresh(db_task)
@@ -269,9 +275,11 @@ def get_tasks_by_project(
 def filter_tasks(
     db: Session,
     project_id: Optional[int] = None,
+    assignee_id: Optional[int] = None,
     status: Optional[str] = None,
     priority: Optional[str] = None,
     search: Optional[str] = None,
+    tag: Optional[str] = None,
     skip: int = 0,
     limit: int = 100,
 ) -> tuple[list[models.Task], int]:
@@ -280,10 +288,14 @@ def filter_tasks(
 
     if project_id is not None:
         query = query.filter(models.Task.project_id == project_id)
+    if assignee_id is not None:
+        query = query.filter(models.Task.assignee_id == assignee_id)
     if status is not None:
         query = query.filter(models.Task.status == models.TaskStatus(status))
     if priority is not None:
         query = query.filter(models.Task.priority == models.TaskPriority(priority))
+    if tag:
+        query = query.join(models.Task.tags).filter(models.Tag.name == tag.lower().strip())
     if search:
         query = query.filter(
             or_(
@@ -292,7 +304,7 @@ def filter_tasks(
             )
         )
 
-    total = query.count()
+    total = query.distinct().count()
     items = query.order_by(models.Task.id.desc()).offset(skip).limit(limit).all()
     return items, total
 
@@ -394,6 +406,65 @@ def delete_task_comment(db: Session, comment_id: int) -> bool:
     db.delete(comment)
     db.commit()
     return True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAG CRUD
+# ══════════════════════════════════════════════════════════════════════════════
+
+def create_tag(db: Session, tag: schemas.TagCreate) -> models.Tag:
+    """Create a new tag."""
+    db_tag = models.Tag(name=tag.name.lower().strip(), color=tag.color.lower().strip())
+    db.add(db_tag)
+    db.commit()
+    db.refresh(db_tag)
+    return db_tag
+
+
+def get_tags(db: Session) -> list[models.Tag]:
+    """Retrieve all available tags."""
+    return db.query(models.Tag).order_by(models.Tag.name.asc()).all()
+
+
+def get_tag(db: Session, tag_id: int) -> models.Tag | None:
+    return db.query(models.Tag).filter(models.Tag.id == tag_id).first()
+
+
+def get_tag_by_name(db: Session, name: str) -> models.Tag | None:
+    return db.query(models.Tag).filter(models.Tag.name == name.lower().strip()).first()
+
+
+def delete_tag(db: Session, tag_id: int) -> bool:
+    db_tag = get_tag(db, tag_id)
+    if not db_tag:
+        return False
+    db.delete(db_tag)
+    db.commit()
+    return True
+
+
+def add_tag_to_task(db: Session, task_id: int, tag_id: int) -> models.Task | None:
+    task = get_task(db, task_id)
+    tag = get_tag(db, tag_id)
+    if not task or not tag:
+        return None
+    if tag not in task.tags:
+        task.tags.append(tag)
+        db.commit()
+        db.refresh(task)
+    return task
+
+
+def remove_tag_from_task(db: Session, task_id: int, tag_id: int) -> models.Task | None:
+    task = get_task(db, task_id)
+    tag = get_tag(db, tag_id)
+    if not task or not tag:
+        return None
+    if tag in task.tags:
+        task.tags.remove(tag)
+        db.commit()
+        db.refresh(task)
+    return task
 
 
 # ══════════════════════════════════════════════════════════════════════════════

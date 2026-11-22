@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, Integer, String, Text, ForeignKey, DateTime, Boolean, Enum as SAEnum
+    Column, Integer, String, Text, ForeignKey, DateTime, Boolean, Table, Enum as SAEnum
 )
 from sqlalchemy.orm import relationship
 import enum
@@ -102,12 +102,38 @@ class Project(Base):
         return f"<Project(id={self.id}, name='{self.name}', owner_id={self.owner_id})>"
 
 
+# ── Task ↔ Tag Association Table ─────────────────────────────────────────────
+
+task_tags = Table(
+    "task_tags",
+    Base.metadata,
+    Column("task_id", Integer, ForeignKey("tasks.id", ondelete="CASCADE"), primary_key=True),
+    Column("tag_id", Integer, ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
+class Tag(Base):
+    __tablename__ = "tags"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(50), unique=True, nullable=False, index=True)
+    color = Column(String(7), default="#0ea5e9", nullable=False)
+
+    tasks = relationship("Task", secondary=task_tags, back_populates="tags")
+
+    def __repr__(self) -> str:
+        return f"<Tag(id={self.id}, name='{self.name}', color='{self.color}')>"
+
+
 class Task(Base):
     __tablename__ = "tasks"
 
     id = Column(Integer, primary_key=True, index=True)
     project_id = Column(
         Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    assignee_id = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     title = Column(String(300), nullable=False)
     description = Column(Text, default="")
@@ -127,6 +153,8 @@ class Task(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     project = relationship("Project", back_populates="tasks")
+    assignee = relationship("User", foreign_keys=[assignee_id])
+    tags = relationship("Tag", secondary=task_tags, back_populates="tasks")
     comments = relationship(
         "TaskComment", back_populates="task", cascade="all, delete-orphan"
     )

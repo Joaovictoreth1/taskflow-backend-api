@@ -154,6 +154,39 @@ class StudentResponse(StudentBase):
     profile: Optional[ProfileResponse] = None
 
 
+# ── Tag Schemas ──────────────────────────────────────────────────────────────
+
+class TagBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=50)
+    color: str = Field(default="#0ea5e9", max_length=7)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        v = v.strip().lower()
+        if not re.match(r"^[a-zA-Z0-9_\-]+$", v):
+            raise ValueError("Tag name may only contain letters, numbers, hyphens, and underscores")
+        return v
+
+    @field_validator("color")
+    @classmethod
+    def validate_color(cls, v: str) -> str:
+        v = v.strip()
+        if not re.match(r"^#(?:[0-9a-fA-F]{3}){1,2}$", v):
+            raise ValueError("Color must be a valid hex color code (e.g. #0ea5e9 or #fff)")
+        return v
+
+
+class TagCreate(TagBase):
+    pass
+
+
+class TagResponse(TagBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+
+
 # ── Task Schemas ─────────────────────────────────────────────────────────────
 
 class TaskBase(BaseModel):
@@ -162,6 +195,7 @@ class TaskBase(BaseModel):
     status: str = Field(default="todo")
     priority: str = Field(default="medium")
     due_date: Optional[datetime] = None
+    assignee_id: Optional[int] = None
 
     @field_validator("status")
     @classmethod
@@ -181,7 +215,7 @@ class TaskBase(BaseModel):
 
 
 class TaskCreate(TaskBase):
-    pass
+    tag_ids: list[int] = []
 
 
 class TaskUpdate(BaseModel):
@@ -190,6 +224,7 @@ class TaskUpdate(BaseModel):
     status: Optional[str] = None
     priority: Optional[str] = None
     due_date: Optional[datetime] = None
+    assignee_id: Optional[int] = None
 
     @field_validator("status")
     @classmethod
@@ -218,6 +253,7 @@ class TaskResponse(TaskBase):
     id: int
     project_id: int
     created_at: datetime
+    tags: list[TagResponse] = []
 
 
 # ── Project Schemas ──────────────────────────────────────────────────────────
