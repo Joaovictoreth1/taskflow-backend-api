@@ -1,6 +1,7 @@
 # Virtual environment
 venv/
 .venv/
+.venv*/
 env/
 
 # Python
@@ -20,6 +21,8 @@ build/
 
 # Environment
 .env
+.env.*
+!.env.example
 
 # IDE
 .vscode/
@@ -36,4 +39,9 @@ htmlcov/
 .coverage
 .coverage.*
 .pytest_cache/
-
+.ruff_cache/
+.mypy_cache/
+coverage.xml
+*.sqlite
+*.db-wal
+*.db-shm

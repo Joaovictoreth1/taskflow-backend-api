@@ -1,17 +1,57 @@
 """CRUD operations for all models (Students, Profiles, Projects, Tasks, Users)."""
 
-from typing import Optional
+import csv
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from sqlalchemy.orm import Session
-from sqlalchemy import or_, func
+from io import StringIO
+from typing import Optional
+
+from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.sql.elements import ColumnElement
 
 from app import models, schemas
 from app.security import hash_password, verify_password
 
 
+class WriteConflict(Exception):
+    """A concurrent write or stale reference violated a database constraint."""
+
+
+@contextmanager
+def write(db: Session) -> Iterator[None]:
+    try:
+        yield
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        state = getattr(exc.orig, "sqlstate", None)
+        sqlite_error = getattr(exc.orig, "sqlite_errorname", None)
+        if state in {"23503", "23505"} or sqlite_error in {
+            "SQLITE_CONSTRAINT_FOREIGNKEY",
+            "SQLITE_CONSTRAINT_UNIQUE",
+            "SQLITE_CONSTRAINT_PRIMARYKEY",
+        }:
+            raise WriteConflict from exc
+        raise
+    except Exception:
+        db.rollback()
+        raise
+
+
+def commit(db: Session) -> None:
+    with write(db):
+        pass
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # USER CRUD (Authentication & Security)
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def create_user(db: Session, user: schemas.UserCreate) -> models.User:
     """Create a new user with bcrypt-hashed password."""
@@ -21,7 +61,7 @@ def create_user(db: Session, user: schemas.UserCreate) -> models.User:
         hashed_password=hash_password(user.password),
     )
     db.add(db_user)
-    db.commit()
+    commit(db)
     db.refresh(db_user)
     return db_user
 
@@ -38,9 +78,7 @@ def get_user_by_email(db: Session, email: str) -> models.User | None:
     return db.query(models.User).filter(models.User.email == email.lower()).first()
 
 
-def authenticate_user(
-    db: Session, username_or_email: str, password: str
-) -> models.User | None:
+def authenticate_user(db: Session, username_or_email: str, password: str) -> models.User | None:
     """Authenticate a user by username or email and plaintext password."""
     identifier = username_or_email.lower().strip()
     user = (
@@ -59,20 +97,17 @@ def authenticate_user(
 # STUDENT CRUD
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def create_student(db: Session, student: schemas.StudentCreate) -> models.Student:
     db_student = models.Student(name=student.name, email=student.email)
-    db.add(db_student)
-    db.flush()
-
     if student.profile:
-        db_profile = models.Profile(
-            student_id=db_student.id,
+        db_student.profile = models.Profile(
             bio=student.profile.bio,
             avatar_url=student.profile.avatar_url,
         )
-        db.add(db_profile)
 
-    db.commit()
+    db.add(db_student)
+    commit(db)
     db.refresh(db_student)
     return db_student
 
@@ -86,7 +121,14 @@ def get_student_by_email(db: Session, email: str) -> models.Student | None:
 
 
 def get_students(db: Session, skip: int = 0, limit: int = 100) -> list[models.Student]:
-    return db.query(models.Student).offset(skip).limit(limit).all()
+    return (
+        db.query(models.Student)
+        .options(selectinload(models.Student.profile))
+        .order_by(models.Student.id)
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
 
 
 def update_student(
@@ -100,7 +142,7 @@ def update_student(
     for key, value in update_data.items():
         setattr(db_student, key, value)
 
-    db.commit()
+    commit(db)
     db.refresh(db_student)
     return db_student
 
@@ -110,13 +152,14 @@ def delete_student(db: Session, student_id: int) -> bool:
     if not db_student:
         return False
     db.delete(db_student)
-    db.commit()
+    commit(db)
     return True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PROFILE CRUD
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def create_profile(
     db: Session, student_id: int, profile: schemas.ProfileCreate
@@ -131,7 +174,7 @@ def create_profile(
         student_id=student_id, bio=profile.bio, avatar_url=profile.avatar_url
     )
     db.add(db_profile)
-    db.commit()
+    commit(db)
     db.refresh(db_profile)
     return db_profile
 
@@ -147,7 +190,7 @@ def update_profile(
     for key, value in update_data.items():
         setattr(db_student.profile, key, value)
 
-    db.commit()
+    commit(db)
     db.refresh(db_student.profile)
     return db_student.profile
 
@@ -155,6 +198,7 @@ def update_profile(
 # ══════════════════════════════════════════════════════════════════════════════
 # PROJECT CRUD
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def create_project(
     db: Session, project: schemas.ProjectCreate, owner_id: Optional[int] = None
@@ -165,13 +209,13 @@ def create_project(
         owner_id=owner_id,
     )
     db.add(db_project)
-    db.commit()
+    commit(db)
     db.refresh(db_project)
     return db_project
 
 
-def get_project(db: Session, project_id: int) -> models.Project | None:
-    return db.query(models.Project).filter(models.Project.id == project_id).first()
+def get_project(db: Session, project_id: int, *, owner_id: int) -> models.Project | None:
+    return db.query(models.Project).filter_by(id=project_id, owner_id=owner_id).first()
 
 
 def get_projects(
@@ -186,7 +230,7 @@ def get_projects(
         query = query.filter(models.Project.owner_id == owner_id)
     if search:
         query = query.filter(models.Project.name.ilike(f"%{search}%"))
-    return query.offset(skip).limit(limit).all()
+    return query.order_by(models.Project.id).offset(skip).limit(limit).all()
 
 
 def count_projects(
@@ -201,63 +245,99 @@ def count_projects(
 
 
 def update_project(
-    db: Session, project_id: int, project: schemas.ProjectUpdate
-) -> models.Project | None:
-    db_project = get_project(db, project_id)
-    if not db_project:
-        return None
-
+    db: Session, db_project: models.Project, project: schemas.ProjectUpdate
+) -> models.Project:
     update_data = project.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(db_project, key, value)
 
-    db.commit()
+    commit(db)
     db.refresh(db_project)
     return db_project
 
 
-def delete_project(db: Session, project_id: int) -> bool:
-    db_project = get_project(db, project_id)
-    if not db_project:
-        return False
+def delete_project(db: Session, db_project: models.Project) -> None:
     db.delete(db_project)
-    db.commit()
-    return True
+    commit(db)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TASK CRUD
 # ══════════════════════════════════════════════════════════════════════════════
 
-def create_task(
-    db: Session, project_id: int, task: schemas.TaskCreate
-) -> models.Task | None:
-    db_project = get_project(db, project_id)
-    if not db_project:
-        return None
 
+def create_task(
+    db: Session,
+    project: models.Project,
+    task: schemas.TaskCreate,
+) -> models.Task:
+    validate_assignee(db, task.assignee_id)
     db_task = models.Task(
-        project_id=project_id,
+        project_id=project.id,
         assignee_id=task.assignee_id,
         title=task.title,
         description=task.description,
         status=models.TaskStatus(task.status),
         priority=models.TaskPriority(task.priority),
-        due_date=task.due_date,
+        due_date=task.due_date.replace(tzinfo=None) if task.due_date else None,
     )
 
-    if getattr(task, "tag_ids", None):
-        tags = db.query(models.Tag).filter(models.Tag.id.in_(task.tag_ids)).all()
+    if task.tag_ids:
+        tags = (
+            db.query(models.Tag)
+            .filter(models.Tag.owner_id == project.owner_id, models.Tag.id.in_(task.tag_ids))
+            .all()
+        )
+        if len(tags) != len(set(task.tag_ids)):
+            raise InvalidReference("One or more tags were not found")
         db_task.tags = tags
 
     db.add(db_task)
-    db.commit()
+    commit(db)
     db.refresh(db_task)
     return db_task
 
 
-def get_task(db: Session, task_id: int) -> models.Task | None:
-    return db.query(models.Task).filter(models.Task.id == task_id).first()
+class InvalidReference(Exception):
+    """An input references an unavailable resource."""
+
+
+def validate_assignee(db: Session, assignee_id: int | None) -> None:
+    if (
+        assignee_id is not None
+        and not db.query(models.User.id)
+        .filter_by(
+            id=assignee_id,
+            is_active=True,
+        )
+        .first()
+    ):
+        raise InvalidReference("Assignee was not found")
+
+
+def task_access(actor_id: int, *, owner_only: bool = False) -> ColumnElement[bool]:
+    owned = models.Task.project.has(models.Project.owner_id == actor_id)
+    if owner_only:
+        return owned
+    return or_(
+        owned,
+        (models.Task.assignee_id == actor_id)
+        & models.Task.project.has(models.Project.owner_id.is_not(None)),
+    )
+
+
+def get_task(
+    db: Session,
+    task_id: int,
+    *,
+    actor_id: int,
+    owner_only: bool = False,
+) -> models.Task | None:
+    return (
+        db.query(models.Task)
+        .filter(models.Task.id == task_id, task_access(actor_id, owner_only=owner_only))
+        .first()
+    )
 
 
 def get_tasks_by_project(
@@ -266,6 +346,8 @@ def get_tasks_by_project(
     return (
         db.query(models.Task)
         .filter(models.Task.project_id == project_id)
+        .options(selectinload(models.Task.tags))
+        .order_by(models.Task.id)
         .offset(skip)
         .limit(limit)
         .all()
@@ -274,28 +356,30 @@ def get_tasks_by_project(
 
 def filter_tasks(
     db: Session,
+    *,
+    actor_id: int,
     project_id: Optional[int] = None,
     assignee_id: Optional[int] = None,
-    status: Optional[str] = None,
-    priority: Optional[str] = None,
+    status: models.TaskStatus | None = None,
+    priority: models.TaskPriority | None = None,
     search: Optional[str] = None,
     tag: Optional[str] = None,
     skip: int = 0,
     limit: int = 100,
 ) -> tuple[list[models.Task], int]:
     """Filter tasks with multiple criteria and return both items and total count."""
-    query = db.query(models.Task)
+    query = db.query(models.Task).filter(task_access(actor_id))
 
     if project_id is not None:
         query = query.filter(models.Task.project_id == project_id)
     if assignee_id is not None:
         query = query.filter(models.Task.assignee_id == assignee_id)
     if status is not None:
-        query = query.filter(models.Task.status == models.TaskStatus(status))
+        query = query.filter(models.Task.status == status)
     if priority is not None:
-        query = query.filter(models.Task.priority == models.TaskPriority(priority))
+        query = query.filter(models.Task.priority == priority)
     if tag:
-        query = query.join(models.Task.tags).filter(models.Tag.name == tag.lower().strip())
+        query = query.filter(models.Task.tags.any(models.Tag.name == tag.lower().strip()))
     if search:
         query = query.filter(
             or_(
@@ -304,55 +388,61 @@ def filter_tasks(
             )
         )
 
-    total = query.distinct().count()
-    items = query.order_by(models.Task.id.desc()).offset(skip).limit(limit).all()
+    total = query.count()
+    items = (
+        query.options(selectinload(models.Task.tags))
+        .order_by(models.Task.id.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     return items, total
 
 
-def update_task(
-    db: Session, task_id: int, task: schemas.TaskUpdate
-) -> models.Task | None:
-    db_task = get_task(db, task_id)
-    if not db_task:
-        return None
-
+def update_task(db: Session, db_task: models.Task, task: schemas.TaskUpdate) -> models.Task:
+    validate_assignee(db, task.assignee_id)
     update_data = task.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         if key == "status" and value is not None:
             value = models.TaskStatus(value)
         elif key == "priority" and value is not None:
             value = models.TaskPriority(value)
+        elif key == "due_date" and value is not None:
+            value = value.replace(tzinfo=None)
         setattr(db_task, key, value)
 
-    db.commit()
+    commit(db)
     db.refresh(db_task)
     return db_task
 
 
-def delete_task(db: Session, task_id: int) -> bool:
-    db_task = get_task(db, task_id)
-    if not db_task:
-        return False
+def delete_task(db: Session, db_task: models.Task) -> None:
     db.delete(db_task)
-    db.commit()
-    return True
+    commit(db)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # USER PROFILE & PASSWORD CRUD
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def change_user_password(db: Session, user: models.User, new_password: str) -> None:
-    """Update user password with new bcrypt hash."""
-    user.hashed_password = hash_password(new_password)
-    db.commit()
-    db.refresh(user)
+    """Change a password only if no concurrent rotation has won."""
+    with write(db):
+        changed = db.scalar(
+            update(models.User)
+            .where(models.User.id == user.id, models.User.hashed_password == user.hashed_password)
+            .values(hashed_password=hash_password(new_password))
+            .returning(models.User.id)
+        )
+        if changed is None:
+            raise WriteConflict
 
 
 def update_user_email(db: Session, user: models.User, new_email: str) -> models.User:
     """Update user email address."""
     user.email = new_email.lower().strip()
-    db.commit()
+    commit(db)
     db.refresh(user)
     return user
 
@@ -361,50 +451,61 @@ def update_user_email(db: Session, user: models.User, new_email: str) -> models.
 # TASK COMMENTS CRUD
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def create_task_comment(
     db: Session,
-    task_id: int,
+    task: models.Task,
     comment: schemas.TaskCommentCreate,
-    user: Optional[models.User] = None,
-    guest_name: str = "Anonymous",
-) -> models.TaskComment | None:
+    user: models.User,
+) -> models.TaskComment:
     """Create a new comment on a task."""
-    task = get_task(db, task_id)
-    if not task:
-        return None
-
-    author = user.username if user else guest_name
-    user_id = user.id if user else None
-
     db_comment = models.TaskComment(
-        task_id=task_id,
-        user_id=user_id,
-        author_name=author,
+        task_id=task.id,
+        user_id=user.id,
+        author_name=user.username,
         content=comment.content.strip(),
     )
     db.add(db_comment)
-    db.commit()
+    commit(db)
     db.refresh(db_comment)
     return db_comment
 
 
-def get_task_comments(db: Session, task_id: int) -> list[models.TaskComment]:
+def get_task_comments(
+    db: Session,
+    task_id: int,
+    *,
+    skip: int,
+    limit: int,
+) -> list[models.TaskComment]:
     """Retrieve all comments for a task ordered chronologically."""
     return (
         db.query(models.TaskComment)
         .filter(models.TaskComment.task_id == task_id)
         .order_by(models.TaskComment.id.asc())
+        .offset(skip)
+        .limit(limit)
         .all()
     )
 
 
-def delete_task_comment(db: Session, comment_id: int) -> bool:
+def delete_task_comment(db: Session, task_id: int, comment_id: int, actor_id: int) -> bool:
     """Delete a comment by ID."""
-    comment = db.query(models.TaskComment).filter(models.TaskComment.id == comment_id).first()
+    comment = (
+        db.query(models.TaskComment)
+        .filter_by(id=comment_id, task_id=task_id)
+        .filter(
+            or_(
+                models.TaskComment.user_id == actor_id,
+                models.TaskComment.task.has(task_access(actor_id, owner_only=True)),
+            )
+        )
+        .first()
+    )
     if not comment:
         return False
     db.delete(comment)
-    db.commit()
+    commit(db)
     return True
 
 
@@ -412,58 +513,72 @@ def delete_task_comment(db: Session, comment_id: int) -> bool:
 # TAG CRUD
 # ══════════════════════════════════════════════════════════════════════════════
 
-def create_tag(db: Session, tag: schemas.TagCreate) -> models.Tag:
+
+def create_tag(db: Session, tag: schemas.TagCreate, *, owner_id: int) -> models.Tag:
     """Create a new tag."""
-    db_tag = models.Tag(name=tag.name.lower().strip(), color=tag.color.lower().strip())
+    db_tag = models.Tag(name=tag.name, color=tag.color, owner_id=owner_id)
     db.add(db_tag)
-    db.commit()
+    commit(db)
     db.refresh(db_tag)
     return db_tag
 
 
-def get_tags(db: Session) -> list[models.Tag]:
-    """Retrieve all available tags."""
-    return db.query(models.Tag).order_by(models.Tag.name.asc()).all()
+def get_tags(db: Session, *, owner_id: int, skip: int, limit: int) -> list[models.Tag]:
+    return (
+        db.query(models.Tag)
+        .filter_by(owner_id=owner_id)
+        .order_by(models.Tag.name)
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
 
 
-def get_tag(db: Session, tag_id: int) -> models.Tag | None:
-    return db.query(models.Tag).filter(models.Tag.id == tag_id).first()
+def get_tag(db: Session, tag_id: int, *, owner_id: int) -> models.Tag | None:
+    return db.query(models.Tag).filter_by(id=tag_id, owner_id=owner_id).first()
 
 
-def get_tag_by_name(db: Session, name: str) -> models.Tag | None:
-    return db.query(models.Tag).filter(models.Tag.name == name.lower().strip()).first()
+def get_tag_by_name(db: Session, name: str, *, owner_id: int) -> models.Tag | None:
+    return db.query(models.Tag).filter_by(name=name, owner_id=owner_id).first()
 
 
-def delete_tag(db: Session, tag_id: int) -> bool:
-    db_tag = get_tag(db, tag_id)
+def delete_tag(db: Session, tag_id: int, *, owner_id: int) -> bool:
+    db_tag = get_tag(db, tag_id, owner_id=owner_id)
     if not db_tag:
         return False
     db.delete(db_tag)
-    db.commit()
+    commit(db)
     return True
 
 
-def add_tag_to_task(db: Session, task_id: int, tag_id: int) -> models.Task | None:
-    task = get_task(db, task_id)
-    tag = get_tag(db, tag_id)
-    if not task or not tag:
-        return None
-    if tag not in task.tags:
-        task.tags.append(tag)
-        db.commit()
-        db.refresh(task)
-    return task
-
-
-def remove_tag_from_task(db: Session, task_id: int, tag_id: int) -> models.Task | None:
-    task = get_task(db, task_id)
-    tag = get_tag(db, tag_id)
-    if not task or not tag:
-        return None
-    if tag in task.tags:
-        task.tags.remove(tag)
-        db.commit()
-        db.refresh(task)
+def set_task_tag(
+    db: Session,
+    task: models.Task,
+    tag_id: int,
+    *,
+    owner_id: int,
+    attached: bool,
+) -> models.Task:
+    if get_tag(db, tag_id, owner_id=owner_id) is None:
+        raise InvalidReference("Tag not found")
+    links = models.task_tags
+    with write(db):
+        if attached:
+            if db.get_bind().dialect.name == "postgresql":
+                db.execute(
+                    pg_insert(links)
+                    .values(task_id=task.id, tag_id=tag_id)
+                    .on_conflict_do_nothing(index_elements=[links.c.task_id, links.c.tag_id])
+                )
+            else:
+                db.execute(
+                    sqlite_insert(links)
+                    .values(task_id=task.id, tag_id=tag_id)
+                    .on_conflict_do_nothing(index_elements=[links.c.task_id, links.c.tag_id])
+                )
+        else:
+            db.execute(delete(links).where(links.c.task_id == task.id, links.c.tag_id == tag_id))
+    db.expire(task, ["tags"])
     return task
 
 
@@ -471,71 +586,110 @@ def remove_tag_from_task(db: Session, task_id: int, tag_id: int) -> models.Task 
 # ANALYTICS & STATISTICS CRUD
 # ══════════════════════════════════════════════════════════════════════════════
 
-def get_analytics_overview(db: Session) -> dict:
-    """Compute global task management analytics and KPIs."""
-    total_projects = db.query(models.Project).count()
-    all_tasks = db.query(models.Task).all()
-    total_tasks = len(all_tasks)
 
-    tasks_by_status = {"todo": 0, "in_progress": 0, "done": 0}
-    tasks_by_priority = {"low": 0, "medium": 0, "high": 0, "urgent": 0}
-
-    now = datetime.now(timezone.utc)
-    overdue_count = 0
-
-    for task in all_tasks:
-        s_val = task.status.value if hasattr(task.status, "value") else str(task.status)
-        p_val = task.priority.value if hasattr(task.priority, "value") else str(task.priority)
-
-        if s_val in tasks_by_status:
-            tasks_by_status[s_val] += 1
-        if p_val in tasks_by_priority:
-            tasks_by_priority[p_val] += 1
-
-        if task.due_date:
-            due = task.due_date
-            if due.tzinfo is None:
-                due = due.replace(tzinfo=timezone.utc)
-            if due < now and s_val != "done":
-                overdue_count += 1
-
-    completed = tasks_by_status["done"]
-    in_progress = tasks_by_status["in_progress"]
-    todo = tasks_by_status["todo"]
-    completion_rate = round((completed / total_tasks) * 100, 2) if total_tasks > 0 else 0.0
-
-    return {
-        "total_projects": total_projects,
-        "total_tasks": total_tasks,
-        "completed_tasks": completed,
-        "in_progress_tasks": in_progress,
-        "todo_tasks": todo,
-        "overdue_tasks": overdue_count,
-        "completion_rate_percent": completion_rate,
-        "tasks_by_priority": tasks_by_priority,
-        "tasks_by_status": tasks_by_status,
-    }
+def get_analytics_overview(db: Session, *, owner_id: int) -> schemas.AnalyticsOverviewResponse:
+    task = models.Task
+    project = models.Project
+    project_count = (
+        select(func.count(project.id)).where(project.owner_id == owner_id).scalar_subquery()
+    )
+    statuses = list(models.TaskStatus)
+    priorities = list(models.TaskPriority)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    projects, total, overdue, *counts = db.execute(
+        select(
+            project_count,
+            func.count(task.id),
+            func.count(task.id).filter(task.due_date < now, task.status != models.TaskStatus.DONE),
+            *(func.count(task.id).filter(task.status == status) for status in statuses),
+            *(func.count(task.id).filter(task.priority == priority) for priority in priorities),
+        )
+        .join(task.project)
+        .where(project.owner_id == owner_id)
+    ).one()
+    by_status = dict(
+        zip((status.value for status in statuses), counts[: len(statuses)], strict=True)
+    )
+    by_priority = dict(
+        zip((priority.value for priority in priorities), counts[len(statuses) :], strict=True)
+    )
+    completed = by_status["done"]
+    return schemas.AnalyticsOverviewResponse(
+        total_projects=projects,
+        total_tasks=total,
+        completed_tasks=completed,
+        in_progress_tasks=by_status["in_progress"],
+        todo_tasks=by_status["todo"],
+        overdue_tasks=overdue,
+        completion_rate_percent=round(completed * 100 / total, 2) if total else 0.0,
+        tasks_by_priority=by_priority,
+        tasks_by_status=by_status,
+    )
 
 
-def get_project_stats(db: Session, project_id: int) -> dict | None:
-    """Compute metrics for a specific project."""
-    project = get_project(db, project_id)
-    if not project:
-        return None
+def get_project_stats(db: Session, project: models.Project) -> schemas.ProjectStatsResponse:
+    task = models.Task
+    todo, in_progress, completed = db.execute(
+        select(
+            *(func.count(task.id).filter(task.status == status) for status in models.TaskStatus)
+        ).where(task.project_id == project.id)
+    ).one()
+    total = todo + in_progress + completed
+    return schemas.ProjectStatsResponse(
+        project_id=project.id,
+        project_name=project.name,
+        total_tasks=total,
+        completed_tasks=completed,
+        in_progress_tasks=in_progress,
+        todo_tasks=todo,
+        completion_rate_percent=round(completed * 100 / total, 2) if total else 0.0,
+    )
 
-    tasks = project.tasks
-    total = len(tasks)
-    completed = sum(1 for t in tasks if (t.status.value if hasattr(t.status, "value") else str(t.status)) == "done")
-    in_progress = sum(1 for t in tasks if (t.status.value if hasattr(t.status, "value") else str(t.status)) == "in_progress")
-    todo = sum(1 for t in tasks if (t.status.value if hasattr(t.status, "value") else str(t.status)) == "todo")
-    rate = round((completed / total) * 100, 2) if total > 0 else 0.0
 
-    return {
-        "project_id": project.id,
-        "project_name": project.name,
-        "total_tasks": total,
-        "completed_tasks": completed,
-        "in_progress_tasks": in_progress,
-        "todo_tasks": todo,
-        "completion_rate_percent": rate,
-    }
+def csv_cell(value: str | None) -> str:
+    value = value or ""
+    if value.lstrip().startswith(("=", "+", "-", "@")) or value.startswith(("\t", "\r", "\n")):
+        return "'" + value
+    return value
+
+
+def stream_project_csv(db: Session, project_id: int) -> Iterator[str]:
+    task = models.Task
+    query = (
+        select(
+            task.id,
+            task.title,
+            task.status,
+            task.priority,
+            task.due_date,
+            task.created_at,
+            task.description,
+        )
+        .where(task.project_id == project_id)
+        .order_by(task.id)
+        .execution_options(yield_per=256)
+    )
+    with db.execute(query) as result:
+        output = StringIO()
+        writer = csv.writer(output)
+        writer.writerow(
+            ["ID", "Title", "Status", "Priority", "Due Date", "Created At", "Description"]
+        )
+        for rows in result.partitions(256):
+            for task_id, title, status, priority, due, created, description in rows:
+                writer.writerow(
+                    [
+                        task_id,
+                        csv_cell(title),
+                        status.value,
+                        priority.value,
+                        due.isoformat() if due else "",
+                        created.isoformat() if created else "",
+                        csv_cell(description),
+                    ]
+                )
+            yield output.getvalue()
+            output.seek(0)
+            output.truncate()
+        if output.tell():
+            yield output.getvalue()
