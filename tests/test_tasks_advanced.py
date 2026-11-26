@@ -1,16 +1,6 @@
 """Tests for advanced task capabilities: priorities, due dates, filtering, and pagination."""
 
-from datetime import datetime, timezone
-import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-
-from app.database import Base, get_db
-from app.main import app
-
-from tests.conftest import client
+from tests.conftest import authenticated_client as client
 
 
 class TestTaskPriorityAndDueDate:
@@ -121,7 +111,11 @@ class TestTaskFilteringAndPagination:
         )
         client.post(
             f"/projects/{self.p_b_id}/tasks",
-            json={"title": "Push notifications APNS", "status": "in_progress", "priority": "urgent"},
+            json={
+                "title": "Push notifications APNS",
+                "status": "in_progress",
+                "priority": "urgent",
+            },
         )
 
     def test_filter_tasks_by_status(self):

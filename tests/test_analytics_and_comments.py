@@ -1,21 +1,31 @@
 """Integration tests for Analytics, Task Comments, User Management, and CSV Export."""
 
-from datetime import datetime, timezone, timedelta
-from tests.conftest import client
+from datetime import datetime, timedelta, timezone
+
+from tests.conftest import authenticated_client as client
+from tests.conftest import client as anonymous_client
 
 
-def _create_user_and_login(username="ana_dev", email="ana@example.com", password="SecurePassword123"):
-    reg_resp = client.post("/auth/register", json={
-        "username": username,
-        "email": email,
-        "password": password,
-    })
+def _create_user_and_login(
+    username="ana_dev", email="ana@example.com", password="SecurePassword123"
+):
+    reg_resp = client.post(
+        "/auth/register",
+        json={
+            "username": username,
+            "email": email,
+            "password": password,
+        },
+    )
     assert reg_resp.status_code == 201
 
-    login_resp = client.post("/auth/login", json={
-        "username": username,
-        "password": password,
-    })
+    login_resp = client.post(
+        "/auth/login",
+        json={
+            "username": username,
+            "password": password,
+        },
+    )
     assert login_resp.status_code == 200
     token = login_resp.json()["access_token"]
     return token, reg_resp.json()
@@ -25,8 +35,8 @@ def _create_user_and_login(username="ana_dev", email="ana@example.com", password
 # ANALYTICS & STATS TESTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-class TestAnalytics:
 
+class TestAnalytics:
     def test_analytics_overview_empty(self):
         resp = client.get("/analytics/overview")
         assert resp.status_code == 200
@@ -46,25 +56,34 @@ class TestAnalytics:
         future_date = (now + timedelta(days=5)).isoformat()
 
         # Task 1: done
-        client.post(f"/projects/{pid}/tasks", json={
-            "title": "Task 1",
-            "status": "done",
-            "priority": "high",
-        })
+        client.post(
+            f"/projects/{pid}/tasks",
+            json={
+                "title": "Task 1",
+                "status": "done",
+                "priority": "high",
+            },
+        )
         # Task 2: in_progress overdue
-        client.post(f"/projects/{pid}/tasks", json={
-            "title": "Task 2 Overdue",
-            "status": "in_progress",
-            "priority": "urgent",
-            "due_date": past_date,
-        })
+        client.post(
+            f"/projects/{pid}/tasks",
+            json={
+                "title": "Task 2 Overdue",
+                "status": "in_progress",
+                "priority": "urgent",
+                "due_date": past_date,
+            },
+        )
         # Task 3: todo on track
-        client.post(f"/projects/{pid}/tasks", json={
-            "title": "Task 3 On Track",
-            "status": "todo",
-            "priority": "medium",
-            "due_date": future_date,
-        })
+        client.post(
+            f"/projects/{pid}/tasks",
+            json={
+                "title": "Task 3 On Track",
+                "status": "todo",
+                "priority": "medium",
+                "due_date": future_date,
+            },
+        )
 
         resp = client.get("/analytics/overview")
         assert resp.status_code == 200
@@ -107,8 +126,8 @@ class TestAnalytics:
 # USER MANAGEMENT & PASSWORD CHANGE TESTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-class TestUserManagement:
 
+class TestUserManagement:
     def test_update_me_email_success(self):
         token, _ = _create_user_and_login("carlos_ops", "carlos@ops.com")
         headers = {"Authorization": f"Bearer {token}"}
@@ -149,17 +168,23 @@ class TestUserManagement:
         assert resp.json()["status"] == "ok"
 
         # Verify old password no longer works
-        failed_login = client.post("/auth/login", json={
-            "username": "pwd_user",
-            "password": "OldPassword123",
-        })
+        failed_login = client.post(
+            "/auth/login",
+            json={
+                "username": "pwd_user",
+                "password": "OldPassword123",
+            },
+        )
         assert failed_login.status_code == 401
 
         # Verify new password works
-        success_login = client.post("/auth/login", json={
-            "username": "pwd_user",
-            "password": "NewSecretPassword456",
-        })
+        success_login = client.post(
+            "/auth/login",
+            json={
+                "username": "pwd_user",
+                "password": "NewSecretPassword456",
+            },
+        )
         assert success_login.status_code == 200
 
     def test_change_password_wrong_old_fails(self):
@@ -180,32 +205,30 @@ class TestUserManagement:
 # TASK COMMENTS TESTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-class TestTaskComments:
 
+class TestTaskComments:
     def test_create_comment_anonymous(self):
         p = client.post("/projects", json={"name": "Comments Project"}).json()
         t = client.post(f"/projects/{p['id']}/tasks", json={"title": "Discuss Me"}).json()
 
-        resp = client.post(
+        resp = anonymous_client.post(
             f"/tasks/{t['id']}/comments",
             json={"content": "Here is an anonymous observation."},
         )
-        assert resp.status_code == 201
-        data = resp.json()
-        assert data["task_id"] == t["id"]
-        assert data["content"] == "Here is an anonymous observation."
-        assert data["author_name"] == "Anonymous"
-        assert "id" in data
+        assert resp.status_code == 401
 
     def test_create_comment_authenticated(self):
         token, user = _create_user_and_login("commenter", "commenter@domain.com")
-        p = client.post("/projects", json={"name": "Auth Comments Project"}).json()
-        t = client.post(f"/projects/{p['id']}/tasks", json={"title": "Auth Task"}).json()
+        headers = {"Authorization": f"Bearer {token}"}
+        p = client.post("/projects", json={"name": "Auth Comments Project"}, headers=headers).json()
+        t = client.post(
+            f"/projects/{p['id']}/tasks", json={"title": "Auth Task"}, headers=headers
+        ).json()
 
         resp = client.post(
             f"/tasks/{t['id']}/comments",
             json={"content": "Fixing this in branch feat/comments."},
-            headers={"Authorization": f"Bearer {token}"},
+            headers=headers,
         )
         assert resp.status_code == 201
         data = resp.json()
@@ -253,23 +276,29 @@ class TestTaskComments:
 # PROJECT CSV EXPORT TESTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-class TestProjectExport:
 
+class TestProjectExport:
     def test_export_project_tasks_csv_success(self):
         p = client.post("/projects", json={"name": "Export Project", "description": "Desc"}).json()
         pid = p["id"]
 
-        client.post(f"/projects/{pid}/tasks", json={
-            "title": "Backend Architecture",
-            "status": "done",
-            "priority": "urgent",
-            "description": "Setup FastAPI with PostgreSQL",
-        })
-        client.post(f"/projects/{pid}/tasks", json={
-            "title": "Frontend React",
-            "status": "in_progress",
-            "priority": "high",
-        })
+        client.post(
+            f"/projects/{pid}/tasks",
+            json={
+                "title": "Backend Architecture",
+                "status": "done",
+                "priority": "urgent",
+                "description": "Setup FastAPI with PostgreSQL",
+            },
+        )
+        client.post(
+            f"/projects/{pid}/tasks",
+            json={
+                "title": "Frontend React",
+                "status": "in_progress",
+                "priority": "high",
+            },
+        )
 
         resp = client.get(f"/projects/{pid}/export/csv")
         assert resp.status_code == 200

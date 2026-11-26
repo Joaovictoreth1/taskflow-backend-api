@@ -1,19 +1,11 @@
 """Comprehensive API tests with pytest and TestClient."""
 
-import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-from app.database import Base, get_db
-from app.main import app
-
-from tests.conftest import client
-
+from tests.conftest import authenticated_client as client
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HEALTH CHECK TESTS
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TestHealth:
     def test_root(self):
@@ -32,6 +24,7 @@ class TestHealth:
 # STUDENT TESTS
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 class TestStudents:
     def _create_student(self, name="João Victor", email="joao@example.com"):
         return client.post("/students", json={"name": name, "email": email})
@@ -46,11 +39,14 @@ class TestStudents:
         assert "created_at" in data
 
     def test_create_student_with_profile(self):
-        response = client.post("/students", json={
-            "name": "Maria",
-            "email": "maria@example.com",
-            "profile": {"bio": "Developer", "avatar_url": "https://example.com/avatar.png"},
-        })
+        response = client.post(
+            "/students",
+            json={
+                "name": "Maria",
+                "email": "maria@example.com",
+                "profile": {"bio": "Developer", "avatar_url": "https://example.com/avatar.png"},
+            },
+        )
         assert response.status_code == 201
         data = response.json()
         assert data["profile"]["bio"] == "Developer"
@@ -98,9 +94,7 @@ class TestStudents:
     def test_update_student(self):
         create_resp = self._create_student()
         student_id = create_resp.json()["id"]
-        response = client.patch(
-            f"/students/{student_id}", json={"name": "João Updated"}
-        )
+        response = client.patch(f"/students/{student_id}", json={"name": "João Updated"})
         assert response.status_code == 200
         assert response.json()["name"] == "João Updated"
 
@@ -123,6 +117,7 @@ class TestStudents:
 # ══════════════════════════════════════════════════════════════════════════════
 # PROFILE TESTS
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TestProfiles:
     def _create_student(self):
@@ -151,9 +146,7 @@ class TestProfiles:
     def test_update_profile(self):
         student_id = self._create_student()
         client.post(f"/students/{student_id}/profile", json={"bio": "Old bio"})
-        response = client.patch(
-            f"/students/{student_id}/profile", json={"bio": "New bio"}
-        )
+        response = client.patch(f"/students/{student_id}/profile", json={"bio": "New bio"})
         assert response.status_code == 200
         assert response.json()["bio"] == "New bio"
 
@@ -173,6 +166,7 @@ class TestProfiles:
 # ══════════════════════════════════════════════════════════════════════════════
 # PROJECT TESTS
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TestProjects:
     def _create_project(self, name="TaskFlow", description="A project management tool"):
@@ -205,9 +199,7 @@ class TestProjects:
     def test_update_project(self):
         create_resp = self._create_project()
         project_id = create_resp.json()["id"]
-        response = client.patch(
-            f"/projects/{project_id}", json={"name": "TaskFlow v2"}
-        )
+        response = client.patch(f"/projects/{project_id}", json={"name": "TaskFlow v2"})
         assert response.status_code == 200
         assert response.json()["name"] == "TaskFlow v2"
 
@@ -227,6 +219,7 @@ class TestProjects:
 # ══════════════════════════════════════════════════════════════════════════════
 # TASK TESTS
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TestTasks:
     def _create_project(self):
@@ -263,9 +256,7 @@ class TestTasks:
         assert response.status_code == 422
 
     def test_create_task_project_not_found(self):
-        response = client.post(
-            "/projects/999/tasks", json={"title": "Orphan task"}
-        )
+        response = client.post("/projects/999/tasks", json={"title": "Orphan task"})
         assert response.status_code == 404
 
     def test_list_tasks(self):
@@ -324,4 +315,3 @@ class TestTasks:
         data = response.json()
         assert len(data["tasks"]) == 1
         assert data["tasks"][0]["title"] == "Nested task"
-

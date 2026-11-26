@@ -1,14 +1,62 @@
 """Pydantic v2 schemas with strict validation."""
 
-from datetime import datetime
-from typing import Optional, Generic, TypeVar
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 import re
+from datetime import datetime, timezone
+from typing import Annotated, Generic, Optional, TypeVar
+
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+)
 
 T = TypeVar("T")
+MAX_ID = 2_147_483_647
+PositiveID = Annotated[int, Field(gt=0, le=MAX_ID)]
+StripText = Annotated[str, StringConstraints(strip_whitespace=True)]
+
+
+def empty_text(value: object) -> object:
+    return "" if value is None else value
+
+
+LegacyText = Annotated[str, BeforeValidator(empty_text)]
+
+
+def as_utc(value: datetime) -> datetime:
+    return (
+        value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is None
+        else value.astimezone(timezone.utc)
+    )
+
+
+UTCDateTime = Annotated[datetime, AfterValidator(as_utc)]
+
+
+def validate_bcrypt_length(value: str) -> str:
+    if len(value.encode()) > 72:
+        raise ValueError("Password must not exceed 72 UTF-8 bytes")
+    return value
+
+
+Password = Annotated[
+    str, Field(min_length=8, max_length=72), AfterValidator(validate_bcrypt_length)
+]
+
+
+def reject_null(value: T | None) -> T:
+    if value is None:
+        raise ValueError("Field may be omitted but cannot be null")
+    return value
 
 
 # ── Generic Pagination Envelope ──────────────────────────────────────────────
+
 
 class PaginatedResponse(BaseModel, Generic[T]):
     items: list[T]
@@ -20,8 +68,9 @@ class PaginatedResponse(BaseModel, Generic[T]):
 
 # ── Auth & User Schemas ──────────────────────────────────────────────────────
 
+
 class UserBase(BaseModel):
-    username: str = Field(..., min_length=3, max_length=50)
+    username: StripText = Field(..., min_length=3, max_length=50)
     email: str = Field(..., max_length=255)
 
     @field_validator("username")
@@ -29,9 +78,7 @@ class UserBase(BaseModel):
     def validate_username(cls, v: str) -> str:
         v = v.strip().lower()
         if not re.match(r"^[a-zA-Z0-9_-]+$", v):
-            raise ValueError(
-                "Username may only contain letters, numbers, underscores, and hyphens"
-            )
+            raise ValueError("Username may only contain letters, numbers, underscores, and hyphens")
         return v
 
     @field_validator("email")
@@ -44,7 +91,9 @@ class UserBase(BaseModel):
 
 
 class UserCreate(UserBase):
-    password: str = Field(..., min_length=6, max_length=128)
+    model_config = ConfigDict(extra="forbid")
+
+    password: Password
 
 
 class UserUpdate(BaseModel):
@@ -73,8 +122,10 @@ class UserResponse(UserBase):
 
 
 class UserLogin(BaseModel):
-    username: str
-    password: str
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=128)
 
 
 class Token(BaseModel):
@@ -91,6 +142,7 @@ class TokenData(BaseModel):
 
 # ── Profile Schemas ──────────────────────────────────────────────────────────
 
+
 class ProfileBase(BaseModel):
     bio: str = Field(default="", max_length=2000)
     avatar_url: str = Field(default="", max_length=500)
@@ -103,6 +155,7 @@ class ProfileCreate(ProfileBase):
 class ProfileUpdate(BaseModel):
     bio: Optional[str] = Field(default=None, max_length=2000)
     avatar_url: Optional[str] = Field(default=None, max_length=500)
+    _non_nullable = field_validator("bio", "avatar_url")(reject_null)
 
 
 class ProfileResponse(ProfileBase):
@@ -110,12 +163,15 @@ class ProfileResponse(ProfileBase):
 
     id: int
     student_id: int
+    bio: LegacyText
+    avatar_url: LegacyText
 
 
 # ── Student Schemas ──────────────────────────────────────────────────────────
 
+
 class StudentBase(BaseModel):
-    name: str = Field(..., min_length=2, max_length=120)
+    name: StripText = Field(..., min_length=2, max_length=120)
     email: str = Field(..., max_length=255)
 
     @field_validator("email")
@@ -132,8 +188,9 @@ class StudentCreate(StudentBase):
 
 
 class StudentUpdate(BaseModel):
-    name: Optional[str] = Field(default=None, min_length=2, max_length=120)
+    name: StripText | None = Field(default=None, min_length=2, max_length=120)
     email: Optional[str] = Field(default=None, max_length=255)
+    _non_nullable = field_validator("name", "email")(reject_null)
 
     @field_validator("email")
     @classmethod
@@ -156,6 +213,7 @@ class StudentResponse(StudentBase):
 
 # ── Tag Schemas ──────────────────────────────────────────────────────────────
 
+
 class TagBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=50)
     color: str = Field(default="#0ea5e9", max_length=7)
@@ -166,7 +224,7 @@ class TagBase(BaseModel):
         v = v.strip().lower()
         if not re.match(r"^[a-zA-Z0-9_\-]+$", v):
             raise ValueError("Tag name may only contain letters, numbers, hyphens, and underscores")
-        return v
+        return v.lower()
 
     @field_validator("color")
     @classmethod
@@ -189,13 +247,14 @@ class TagResponse(TagBase):
 
 # ── Task Schemas ─────────────────────────────────────────────────────────────
 
+
 class TaskBase(BaseModel):
-    title: str = Field(..., min_length=1, max_length=300)
+    title: StripText = Field(..., min_length=1, max_length=300)
     description: str = Field(default="", max_length=5000)
     status: str = Field(default="todo")
     priority: str = Field(default="medium")
-    due_date: Optional[datetime] = None
-    assignee_id: Optional[int] = None
+    due_date: UTCDateTime | None = None
+    assignee_id: PositiveID | None = None
 
     @field_validator("status")
     @classmethod
@@ -215,16 +274,22 @@ class TaskBase(BaseModel):
 
 
 class TaskCreate(TaskBase):
-    tag_ids: list[int] = []
+    model_config = ConfigDict(extra="forbid")
+
+    tag_ids: list[PositiveID] = Field(default_factory=list, max_length=100)
 
 
 class TaskUpdate(BaseModel):
-    title: Optional[str] = Field(default=None, min_length=1, max_length=300)
+    model_config = ConfigDict(extra="forbid")
+
+    title: StripText | None = Field(default=None, min_length=1, max_length=300)
     description: Optional[str] = Field(default=None, max_length=5000)
     status: Optional[str] = None
     priority: Optional[str] = None
-    due_date: Optional[datetime] = None
-    assignee_id: Optional[int] = None
+    due_date: UTCDateTime | None = None
+    assignee_id: PositiveID | None = None
+
+    _non_nullable = field_validator("title", "description", "status", "priority")(reject_null)
 
     @field_validator("status")
     @classmethod
@@ -252,39 +317,50 @@ class TaskResponse(TaskBase):
 
     id: int
     project_id: int
-    created_at: datetime
-    tags: list[TagResponse] = []
+    created_at: UTCDateTime
+    description: LegacyText = ""
+    tags: list[TagResponse] = Field(default_factory=list)
 
 
 # ── Project Schemas ──────────────────────────────────────────────────────────
 
+
 class ProjectBase(BaseModel):
-    name: str = Field(..., min_length=1, max_length=200)
+    name: StripText = Field(..., min_length=1, max_length=200)
     description: str = Field(default="", max_length=5000)
 
 
 class ProjectCreate(ProjectBase):
-    pass
+    model_config = ConfigDict(extra="forbid")
 
 
 class ProjectUpdate(BaseModel):
-    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    model_config = ConfigDict(extra="forbid")
+
+    name: StripText | None = Field(default=None, min_length=1, max_length=200)
     description: Optional[str] = Field(default=None, max_length=5000)
+    _non_nullable = field_validator("name", "description")(reject_null)
 
 
-class ProjectResponse(ProjectBase):
+class ProjectSummary(ProjectBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     owner_id: Optional[int] = None
-    created_at: datetime
-    tasks: list[TaskResponse] = []
+    created_at: UTCDateTime
+    description: LegacyText = ""
+
+
+class ProjectResponse(ProjectSummary):
+    tasks: list[TaskResponse] = Field(default_factory=list)
 
 
 # ── Task Comment Schemas ─────────────────────────────────────────────────────
 
+
 class TaskCommentCreate(BaseModel):
     content: str = Field(..., min_length=1, max_length=2000)
+    model_config = ConfigDict(str_strip_whitespace=True)
 
 
 class TaskCommentResponse(BaseModel):
@@ -300,9 +376,10 @@ class TaskCommentResponse(BaseModel):
 
 # ── Password & Profile Management ────────────────────────────────────────────
 
+
 class ChangePasswordRequest(BaseModel):
-    old_password: str = Field(..., min_length=1)
-    new_password: str = Field(..., min_length=6, max_length=128)
+    old_password: str = Field(min_length=1, max_length=128)
+    new_password: Password
 
 
 class UpdateProfileRequest(BaseModel):
@@ -320,6 +397,7 @@ class UpdateProfileRequest(BaseModel):
 
 
 # ── Analytics & Statistics Schemas ───────────────────────────────────────────
+
 
 class AnalyticsOverviewResponse(BaseModel):
     total_projects: int

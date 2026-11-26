@@ -1,38 +1,70 @@
 """FastAPI application with CORS, Rate Limiting, JWT Auth, and Relational CRUD."""
 
+from collections.abc import Awaitable, Callable
 from math import ceil
-from typing import Optional
-from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, status
-from fastapi.security import OAuth2PasswordRequestForm
+from pathlib import Path
+from typing import Annotated
+
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import OAuth2PasswordRequestForm
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
-from app.database import engine, get_db, Base
-from app import crud, schemas, models
-from app.security import create_access_token
+from app import crud, models, schemas
+from app.config import settings
+from app.database import get_db
 from app.dependencies import (
+    CurrentUser,
+    Database,
+    OwnedProject,
+    OwnedTask,
+    ResourceID,
+    VisibleTask,
     get_current_active_user,
-    get_optional_user,
+    require_directory_admin,
 )
-
-# ── Create tables ────────────────────────────────────────────────────────────
-Base.metadata.create_all(bind=engine)
+from app.middleware import RequestBodyLimit
+from app.security import create_access_token, credential_stamp, verify_password
 
 # ── Rate Limiter ─────────────────────────────────────────────────────────────
-limiter = Limiter(key_func=get_remote_address)
+limiter = Limiter(
+    key_func=get_remote_address,
+    storage_uri=settings.rate_limit_storage_uri.get_secret_value(),
+)
 
 # ── FastAPI App ──────────────────────────────────────────────────────────────
 tags_metadata = [
     {"name": "Health", "description": "Liveness and readiness health-check probes."},
-    {"name": "Authentication", "description": "JWT OAuth2 user registration, login, profile, and password rotation."},
-    {"name": "Projects", "description": "Project workspace management, pagination, ownership, and CSV export."},
-    {"name": "Tasks", "description": "Task creation, priority levels, due dates, multi-field filtering, and status updates."},
+    {
+        "name": "Authentication",
+        "description": "JWT OAuth2 user registration, login, profile, and password rotation.",
+    },
+    {
+        "name": "Projects",
+        "description": "Project workspace management, pagination, ownership, and CSV export.",
+    },
+    {
+        "name": "Tasks",
+        "description": "Task creation, priority levels, due dates, multi-field filtering, and status updates.",
+    },
     {"name": "Tags", "description": "Color-coded tags and labels for categorizing tasks."},
-    {"name": "Task Comments", "description": "Collaboration comments and discussion threads on tasks."},
-    {"name": "Analytics", "description": "System-wide and project-specific KPIs, completion rates, and overdue metrics."},
+    {
+        "name": "Task Comments",
+        "description": "Collaboration comments and discussion threads on tasks.",
+    },
+    {
+        "name": "Analytics",
+        "description": "System-wide and project-specific KPIs, completion rates, and overdue metrics.",
+    },
     {"name": "Students", "description": "Academic student records management."},
     {"name": "Profiles", "description": "One-to-one student profiles (bio, avatar)."},
 ]
@@ -50,24 +82,86 @@ app = FastAPI(
     openapi_tags=tags_metadata,
 )
 
+directory = APIRouter(dependencies=[Depends(require_directory_admin)])
+
+
+@app.exception_handler(crud.WriteConflict)
+async def handle_write_conflict(request: Request, exc: crud.WriteConflict) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": "Resource changed or already exists"})
+
+
+@app.exception_handler(crud.InvalidReference)
+async def handle_invalid_reference(request: Request, exc: crud.InvalidReference) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+def project_response(db: Session, project: models.Project) -> schemas.ProjectResponse:
+    details = schemas.ProjectSummary.model_validate(project).model_dump()
+    tasks = crud.get_tasks_by_project(db, project.id, limit=100)
+    return schemas.ProjectResponse(
+        **details,
+        tasks=[schemas.TaskResponse.model_validate(task) for task in tasks],
+    )
+
+
+def task_page(
+    items: list[models.Task], total: int, page: int, size: int
+) -> schemas.PaginatedResponse[schemas.TaskResponse]:
+    return schemas.PaginatedResponse[schemas.TaskResponse](
+        items=[schemas.TaskResponse.model_validate(item) for item in items],
+        total=total,
+        page=page,
+        size=size,
+        pages=ceil(total / size),
+    )
+
+
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.exception_handler(RateLimitExceeded)
+def limit_exceeded(request: Request, exc: RateLimitExceeded) -> Response:
+    return _rate_limit_exceeded_handler(request, exc)
+
 
 # ── CORS ─────────────────────────────────────────────────────────────────────
+app.add_middleware(RequestBodyLimit, max_bytes=settings.max_request_body_bytes)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.cors_origins,
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_request(request: Request, exc: RequestValidationError) -> JSONResponse:
+    errors = [
+        {key: error[key] for key in ("loc", "msg", "type") if key in error}
+        for error in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": errors})
+
+
+@app.middleware("http")
+async def security_headers(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 # ── Health Check ─────────────────────────────────────────────────────────────
 
+
 @app.get("/", tags=["Health"])
 @limiter.limit("60/minute")
-def root(request: Request):
+def root(request: Request) -> dict[str, str]:
     return {
         "status": "ok",
         "message": "TaskFlow API v2.0 is running 🚀",
@@ -76,13 +170,32 @@ def root(request: Request):
 
 
 @app.get("/health", tags=["Health"])
-def health_check():
+def health_check() -> dict[str, str]:
     return {"status": "healthy"}
+
+
+@app.get("/ready", tags=["Health"])
+def readiness_check(db: Database) -> dict[str, str]:
+    try:
+        heads = set(db.scalars(text("SELECT version_num FROM alembic_version")))
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail="Database is not ready") from exc
+    if heads != EXPECTED_MIGRATION_HEADS:
+        raise HTTPException(status_code=503, detail="Database schema is not up to date")
+    return {"status": "ready"}
+
+
+EXPECTED_MIGRATION_HEADS = set(
+    ScriptDirectory.from_config(
+        Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    ).get_heads()
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # AUTHENTICATION ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 @app.post(
     "/auth/register",
@@ -95,7 +208,7 @@ def register_user(
     request: Request,
     user_in: schemas.UserCreate,
     db: Session = Depends(get_db),
-):
+) -> models.User:
     """Register a new user account."""
     if crud.get_user_by_username(db, user_in.username):
         raise HTTPException(
@@ -115,30 +228,28 @@ def register_user(
     response_model=schemas.Token,
     tags=["Authentication"],
 )
-@limiter.limit("30/minute")
+@limiter.limit("10/minute")
 def login(
     request: Request,
-    user_login: Optional[schemas.UserLogin] = None,
-    form_data: Optional[OAuth2PasswordRequestForm] = Depends(lambda: None),
-    db: Session = Depends(get_db),
-):
-    """Authenticate and receive a JWT Bearer access token."""
-    username = None
-    password = None
+    user_login: schemas.UserLogin,
+    db: Database,
+) -> schemas.Token:
+    return authenticate(db, user_login.username, user_login.password)
 
-    if user_login:
-        username = user_login.username
-        password = user_login.password
-    elif form_data:
-        username = form_data.username
-        password = form_data.password
 
-    if not username or not password:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username and password are required",
-        )
+@app.post("/auth/token", response_model=schemas.Token, tags=["Authentication"])
+@limiter.limit("10/minute")
+def login_form(
+    request: Request,
+    form: Annotated[OAuth2PasswordRequestForm, Depends()],
+    db: Database,
+) -> schemas.Token:
+    if not 1 <= len(form.username) <= 255 or not 1 <= len(form.password) <= 128:
+        raise HTTPException(status_code=422, detail="Invalid credential length")
+    return authenticate(db, form.username, form.password)
 
+
+def authenticate(db: Session, username: str, password: str) -> schemas.Token:
     user = crud.authenticate_user(db, username_or_email=username, password=password)
     if not user:
         raise HTTPException(
@@ -152,12 +263,14 @@ def login(
             detail="User account is deactivated",
         )
 
-    token = create_access_token(data={"sub": user.username, "user_id": user.id})
+    token = create_access_token(
+        {"sub": user.username, "user_id": user.id, "pwd": credential_stamp(user.hashed_password)}
+    )
     return schemas.Token(
         access_token=token,
         token_type="bearer",
-        expires_in_minutes=60,
-        user=user,
+        expires_in_minutes=settings.access_token_expire_minutes,
+        user=schemas.UserResponse.model_validate(user),
     )
 
 
@@ -170,7 +283,7 @@ def login(
 def get_me(
     request: Request,
     current_user: models.User = Depends(get_current_active_user),
-):
+) -> models.User:
     """Get current authenticated user profile."""
     return current_user
 
@@ -186,7 +299,7 @@ def update_me(
     profile_in: schemas.UpdateProfileRequest,
     current_user: models.User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
-):
+) -> models.User:
     """Update current user profile (email)."""
     if profile_in.email and profile_in.email != current_user.email:
         existing = crud.get_user_by_email(db, profile_in.email)
@@ -210,9 +323,8 @@ def change_password(
     payload: schemas.ChangePasswordRequest,
     current_user: models.User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
-):
+) -> dict[str, str]:
     """Change current authenticated user password."""
-    from app.security import verify_password
     if not verify_password(payload.old_password, current_user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -226,7 +338,8 @@ def change_password(
 # STUDENT ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
 
-@app.post(
+
+@directory.post(
     "/students",
     response_model=schemas.StudentResponse,
     status_code=status.HTTP_201_CREATED,
@@ -237,50 +350,56 @@ def create_student(
     request: Request,
     student: schemas.StudentCreate,
     db: Session = Depends(get_db),
-):
+) -> models.Student:
     existing = crud.get_student_by_email(db, student.email)
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
     return crud.create_student(db, student)
 
 
-@app.get("/students", response_model=list[schemas.StudentResponse], tags=["Students"])
+@directory.get("/students", response_model=list[schemas.StudentResponse], tags=["Students"])
 @limiter.limit("60/minute")
 def list_students(
     request: Request,
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=100),
     db: Session = Depends(get_db),
-):
+) -> list[models.Student]:
     return crud.get_students(db, skip=skip, limit=limit)
 
 
-@app.get("/students/{student_id}", response_model=schemas.StudentResponse, tags=["Students"])
+@directory.get("/students/{student_id}", response_model=schemas.StudentResponse, tags=["Students"])
 @limiter.limit("60/minute")
-def get_student(request: Request, student_id: int, db: Session = Depends(get_db)):
+def get_student(
+    request: Request, student_id: ResourceID, db: Session = Depends(get_db)
+) -> models.Student:
     student = crud.get_student(db, student_id)
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     return student
 
 
-@app.patch("/students/{student_id}", response_model=schemas.StudentResponse, tags=["Students"])
+@directory.patch(
+    "/students/{student_id}", response_model=schemas.StudentResponse, tags=["Students"]
+)
 @limiter.limit("30/minute")
 def update_student(
     request: Request,
-    student_id: int,
+    student_id: ResourceID,
     student: schemas.StudentUpdate,
     db: Session = Depends(get_db),
-):
+) -> models.Student:
     updated = crud.update_student(db, student_id, student)
     if not updated:
         raise HTTPException(status_code=404, detail="Student not found")
     return updated
 
 
-@app.delete("/students/{student_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Students"])
+@directory.delete(
+    "/students/{student_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Students"]
+)
 @limiter.limit("30/minute")
-def delete_student(request: Request, student_id: int, db: Session = Depends(get_db)):
+def delete_student(request: Request, student_id: ResourceID, db: Session = Depends(get_db)) -> None:
     if not crud.delete_student(db, student_id):
         raise HTTPException(status_code=404, detail="Student not found")
 
@@ -289,7 +408,8 @@ def delete_student(request: Request, student_id: int, db: Session = Depends(get_
 # PROFILE ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
 
-@app.post(
+
+@directory.post(
     "/students/{student_id}/profile",
     response_model=schemas.ProfileResponse,
     status_code=status.HTTP_201_CREATED,
@@ -298,10 +418,10 @@ def delete_student(request: Request, student_id: int, db: Session = Depends(get_
 @limiter.limit("30/minute")
 def create_profile(
     request: Request,
-    student_id: int,
+    student_id: ResourceID,
     profile: schemas.ProfileCreate,
     db: Session = Depends(get_db),
-):
+) -> models.Profile:
     result = crud.create_profile(db, student_id, profile)
     if result is None:
         raise HTTPException(
@@ -311,7 +431,7 @@ def create_profile(
     return result
 
 
-@app.patch(
+@directory.patch(
     "/students/{student_id}/profile",
     response_model=schemas.ProfileResponse,
     tags=["Profiles"],
@@ -319,10 +439,10 @@ def create_profile(
 @limiter.limit("30/minute")
 def update_profile(
     request: Request,
-    student_id: int,
+    student_id: ResourceID,
     profile: schemas.ProfileUpdate,
     db: Session = Depends(get_db),
-):
+) -> models.Profile:
     result = crud.update_profile(db, student_id, profile)
     if result is None:
         raise HTTPException(status_code=404, detail="Student or profile not found")
@@ -330,8 +450,12 @@ def update_profile(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+app.include_router(directory)
+
+
 # PROJECT ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 @app.post(
     "/projects",
@@ -341,86 +465,77 @@ def update_profile(
 )
 @limiter.limit("30/minute")
 def create_project(
-    request: Request,
-    project: schemas.ProjectCreate,
-    current_user: Optional[models.User] = Depends(get_optional_user),
-    db: Session = Depends(get_db),
-):
-    owner_id = current_user.id if current_user else None
-    return crud.create_project(db, project, owner_id=owner_id)
+    request: Request, project: schemas.ProjectCreate, user: CurrentUser, db: Database
+) -> models.Project:
+    return crud.create_project(db, project, owner_id=user.id)
 
 
-@app.get("/projects", response_model=list[schemas.ProjectResponse], tags=["Projects"])
+@app.get("/projects", response_model=list[schemas.ProjectSummary], tags=["Projects"])
 @limiter.limit("60/minute")
 def list_projects(
     request: Request,
-    skip: int = Query(0, ge=0),
+    user: CurrentUser,
+    db: Database,
+    skip: int = Query(0, ge=0, le=1_000_000),
     limit: int = Query(100, ge=1, le=100),
-    search: Optional[str] = Query(None, description="Search by project name"),
-    db: Session = Depends(get_db),
-):
-    return crud.get_projects(db, skip=skip, limit=limit, search=search)
+    search: str | None = Query(None, max_length=200),
+) -> list[models.Project]:
+    return crud.get_projects(db, skip=skip, limit=limit, search=search, owner_id=user.id)
 
 
 @app.get(
     "/projects/paginated",
-    response_model=schemas.PaginatedResponse[schemas.ProjectResponse],
+    response_model=schemas.PaginatedResponse[schemas.ProjectSummary],
     tags=["Projects"],
 )
 @limiter.limit("60/minute")
 def list_projects_paginated(
     request: Request,
-    page: int = Query(1, ge=1, description="Page number starting at 1"),
-    size: int = Query(10, ge=1, le=100, description="Page size"),
-    search: Optional[str] = Query(None, description="Search by project name"),
-    db: Session = Depends(get_db),
-):
+    user: CurrentUser,
+    db: Database,
+    page: int = Query(1, ge=1, le=10_000),
+    size: int = Query(10, ge=1, le=100),
+    search: str | None = Query(None, max_length=200),
+) -> schemas.PaginatedResponse[schemas.ProjectSummary]:
     skip = (page - 1) * size
-    items = crud.get_projects(db, skip=skip, limit=size, search=search)
-    total = crud.count_projects(db, search=search)
-    pages = ceil(total / size) if size > 0 else 0
-    return schemas.PaginatedResponse(
-        items=items,
+    items = crud.get_projects(db, skip=skip, limit=size, search=search, owner_id=user.id)
+    total = crud.count_projects(db, search=search, owner_id=user.id)
+    return schemas.PaginatedResponse[schemas.ProjectSummary](
+        items=[schemas.ProjectSummary.model_validate(item) for item in items],
         total=total,
         page=page,
         size=size,
-        pages=pages,
+        pages=ceil(total / size),
     )
 
 
 @app.get("/projects/{project_id}", response_model=schemas.ProjectResponse, tags=["Projects"])
 @limiter.limit("60/minute")
-def get_project(request: Request, project_id: int, db: Session = Depends(get_db)):
-    project = crud.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return project
+def get_project(request: Request, project: OwnedProject, db: Database) -> schemas.ProjectResponse:
+    return project_response(db, project)
 
 
 @app.patch("/projects/{project_id}", response_model=schemas.ProjectResponse, tags=["Projects"])
 @limiter.limit("30/minute")
 def update_project(
     request: Request,
-    project_id: int,
-    project: schemas.ProjectUpdate,
-    db: Session = Depends(get_db),
-):
-    updated = crud.update_project(db, project_id, project)
-    if not updated:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return updated
+    project: OwnedProject,
+    payload: schemas.ProjectUpdate,
+    db: Database,
+) -> schemas.ProjectResponse:
+    return project_response(db, crud.update_project(db, project, payload))
 
 
 @app.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Projects"])
 @limiter.limit("30/minute")
-def delete_project(request: Request, project_id: int, db: Session = Depends(get_db)):
-    if not crud.delete_project(db, project_id):
-        raise HTTPException(status_code=404, detail="Project not found")
+def delete_project(request: Request, project: OwnedProject, db: Database) -> None:
+    crud.delete_project(db, project)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TASK ROUTES (Project Sub-Resource & Global Search / Filtering)
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 @app.post(
     "/projects/{project_id}/tasks",
@@ -430,15 +545,9 @@ def delete_project(request: Request, project_id: int, db: Session = Depends(get_
 )
 @limiter.limit("30/minute")
 def create_task(
-    request: Request,
-    project_id: int,
-    task: schemas.TaskCreate,
-    db: Session = Depends(get_db),
-):
-    result = crud.create_task(db, project_id, task)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return result
+    request: Request, project: OwnedProject, task: schemas.TaskCreate, db: Database
+) -> models.Task:
+    return crud.create_task(db, project, task)
 
 
 @app.get(
@@ -449,12 +558,12 @@ def create_task(
 @limiter.limit("60/minute")
 def list_tasks_by_project(
     request: Request,
-    project_id: int,
-    skip: int = Query(0, ge=0),
+    project: OwnedProject,
+    db: Database,
+    skip: int = Query(0, ge=0, le=1_000_000),
     limit: int = Query(100, ge=1, le=100),
-    db: Session = Depends(get_db),
-):
-    return crud.get_tasks_by_project(db, project_id, skip=skip, limit=limit)
+) -> list[models.Task]:
+    return crud.get_tasks_by_project(db, project.id, skip=skip, limit=limit)
 
 
 @app.get(
@@ -465,31 +574,23 @@ def list_tasks_by_project(
 @limiter.limit("60/minute")
 def list_my_tasks(
     request: Request,
-    page: int = Query(1, ge=1, description="Page number"),
-    size: int = Query(10, ge=1, le=100, description="Items per page"),
-    status: Optional[str] = Query(None, description="Filter by status"),
-    priority: Optional[str] = Query(None, description="Filter by priority"),
-    current_user: models.User = Depends(get_current_active_user),
-    db: Session = Depends(get_db),
-):
-    """Retrieve tasks assigned to the currently authenticated user."""
-    skip = (page - 1) * size
+    user: CurrentUser,
+    db: Database,
+    page: int = Query(1, ge=1, le=10_000),
+    size: int = Query(10, ge=1, le=100),
+    status: models.TaskStatus | None = None,
+    priority: models.TaskPriority | None = None,
+) -> schemas.PaginatedResponse[schemas.TaskResponse]:
     items, total = crud.filter_tasks(
         db,
-        assignee_id=current_user.id,
+        actor_id=user.id,
+        assignee_id=user.id,
         status=status,
         priority=priority,
-        skip=skip,
+        skip=(page - 1) * size,
         limit=size,
     )
-    pages = ceil(total / size) if size > 0 else 0
-    return schemas.PaginatedResponse(
-        items=items,
-        total=total,
-        page=page,
-        size=size,
-        pages=pages,
-    )
+    return task_page(items, total, page, size)
 
 
 @app.get(
@@ -500,72 +601,56 @@ def list_my_tasks(
 @limiter.limit("60/minute")
 def list_all_tasks(
     request: Request,
-    page: int = Query(1, ge=1, description="Page number"),
-    size: int = Query(10, ge=1, le=100, description="Items per page"),
-    project_id: Optional[int] = Query(None, description="Filter by project ID"),
-    assignee_id: Optional[int] = Query(None, description="Filter by assignee user ID"),
-    status: Optional[str] = Query(None, description="Filter by status (todo, in_progress, done)"),
-    priority: Optional[str] = Query(None, description="Filter by priority (low, medium, high, urgent)"),
-    search: Optional[str] = Query(None, description="Search in title or description"),
-    tag: Optional[str] = Query(None, description="Filter by tag name"),
-    db: Session = Depends(get_db),
-):
-    """Global task query with multi-field filtering and paginated envelope."""
-    skip = (page - 1) * size
+    user: CurrentUser,
+    db: Database,
+    page: int = Query(1, ge=1, le=10_000),
+    size: int = Query(10, ge=1, le=100),
+    project_id: int | None = Query(None, gt=0, le=schemas.MAX_ID),
+    assignee_id: int | None = Query(None, gt=0, le=schemas.MAX_ID),
+    status: models.TaskStatus | None = None,
+    priority: models.TaskPriority | None = None,
+    search: str | None = Query(None, max_length=200),
+    tag: str | None = Query(None, max_length=50),
+) -> schemas.PaginatedResponse[schemas.TaskResponse]:
     items, total = crud.filter_tasks(
         db,
+        actor_id=user.id,
         project_id=project_id,
         assignee_id=assignee_id,
         status=status,
         priority=priority,
         search=search,
         tag=tag,
-        skip=skip,
+        skip=(page - 1) * size,
         limit=size,
     )
-    pages = ceil(total / size) if size > 0 else 0
-    return schemas.PaginatedResponse(
-        items=items,
-        total=total,
-        page=page,
-        size=size,
-        pages=pages,
-    )
+    return task_page(items, total, page, size)
 
 
 @app.get("/tasks/{task_id}", response_model=schemas.TaskResponse, tags=["Tasks"])
 @limiter.limit("60/minute")
-def get_task(request: Request, task_id: int, db: Session = Depends(get_db)):
-    task = crud.get_task(db, task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+def get_task(request: Request, task: VisibleTask) -> models.Task:
     return task
 
 
 @app.patch("/tasks/{task_id}", response_model=schemas.TaskResponse, tags=["Tasks"])
 @limiter.limit("30/minute")
 def update_task(
-    request: Request,
-    task_id: int,
-    task: schemas.TaskUpdate,
-    db: Session = Depends(get_db),
-):
-    updated = crud.update_task(db, task_id, task)
-    if not updated:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return updated
+    request: Request, task: OwnedTask, payload: schemas.TaskUpdate, db: Database
+) -> models.Task:
+    return crud.update_task(db, task, payload)
 
 
 @app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Tasks"])
 @limiter.limit("30/minute")
-def delete_task(request: Request, task_id: int, db: Session = Depends(get_db)):
-    if not crud.delete_task(db, task_id):
-        raise HTTPException(status_code=404, detail="Task not found")
+def delete_task(request: Request, task: OwnedTask, db: Database) -> None:
+    crud.delete_task(db, task)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TASK COMMENTS ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 @app.post(
     "/tasks/{task_id}/comments",
@@ -576,16 +661,12 @@ def delete_task(request: Request, task_id: int, db: Session = Depends(get_db)):
 @limiter.limit("30/minute")
 def create_comment(
     request: Request,
-    task_id: int,
+    task: VisibleTask,
     comment_in: schemas.TaskCommentCreate,
-    current_user: Optional[models.User] = Depends(get_optional_user),
-    db: Session = Depends(get_db),
-):
-    """Post a comment on a specific task."""
-    result = crud.create_task_comment(db, task_id, comment_in, user=current_user)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return result
+    user: CurrentUser,
+    db: Database,
+) -> models.TaskComment:
+    return crud.create_task_comment(db, task, comment_in, user)
 
 
 @app.get(
@@ -596,13 +677,12 @@ def create_comment(
 @limiter.limit("60/minute")
 def list_comments(
     request: Request,
-    task_id: int,
-    db: Session = Depends(get_db),
-):
-    """List all comments on a specific task."""
-    if not crud.get_task(db, task_id):
-        raise HTTPException(status_code=404, detail="Task not found")
-    return crud.get_task_comments(db, task_id)
+    task: VisibleTask,
+    db: Database,
+    skip: int = Query(0, ge=0, le=1_000_000),
+    limit: int = Query(100, ge=1, le=100),
+) -> list[models.TaskComment]:
+    return crud.get_task_comments(db, task.id, skip=skip, limit=limit)
 
 
 @app.delete(
@@ -613,18 +693,19 @@ def list_comments(
 @limiter.limit("30/minute")
 def delete_comment(
     request: Request,
-    task_id: int,
-    comment_id: int,
-    db: Session = Depends(get_db),
-):
-    """Delete a comment from a task."""
-    if not crud.delete_task_comment(db, comment_id):
+    task: VisibleTask,
+    comment_id: ResourceID,
+    user: CurrentUser,
+    db: Database,
+) -> None:
+    if not crud.delete_task_comment(db, task.id, comment_id, user.id):
         raise HTTPException(status_code=404, detail="Comment not found")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAG ROUTES (Labels & Categories)
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 @app.post(
     "/tags",
@@ -636,12 +717,12 @@ def delete_comment(
 def create_tag(
     request: Request,
     tag_in: schemas.TagCreate,
-    db: Session = Depends(get_db),
-):
-    """Create a new tag/label with a hex color code."""
-    if crud.get_tag_by_name(db, tag_in.name):
+    user: CurrentUser,
+    db: Database,
+) -> models.Tag:
+    if crud.get_tag_by_name(db, tag_in.name, owner_id=user.id):
         raise HTTPException(status_code=400, detail="Tag already exists")
-    return crud.create_tag(db, tag_in)
+    return crud.create_tag(db, tag_in, owner_id=user.id)
 
 
 @app.get(
@@ -650,9 +731,14 @@ def create_tag(
     tags=["Tags"],
 )
 @limiter.limit("60/minute")
-def list_tags(request: Request, db: Session = Depends(get_db)):
-    """List all available tags."""
-    return crud.get_tags(db)
+def list_tags(
+    request: Request,
+    user: CurrentUser,
+    db: Database,
+    skip: int = Query(0, ge=0, le=1_000_000),
+    limit: int = Query(100, ge=1, le=100),
+) -> list[models.Tag]:
+    return crud.get_tags(db, owner_id=user.id, skip=skip, limit=limit)
 
 
 @app.delete(
@@ -661,9 +747,8 @@ def list_tags(request: Request, db: Session = Depends(get_db)):
     tags=["Tags"],
 )
 @limiter.limit("30/minute")
-def delete_tag(request: Request, tag_id: int, db: Session = Depends(get_db)):
-    """Delete a tag globally."""
-    if not crud.delete_tag(db, tag_id):
+def delete_tag(request: Request, tag_id: ResourceID, user: CurrentUser, db: Database) -> None:
+    if not crud.delete_tag(db, tag_id, owner_id=user.id):
         raise HTTPException(status_code=404, detail="Tag not found")
 
 
@@ -674,16 +759,9 @@ def delete_tag(request: Request, tag_id: int, db: Session = Depends(get_db)):
 )
 @limiter.limit("30/minute")
 def assign_tag_to_task(
-    request: Request,
-    task_id: int,
-    tag_id: int,
-    db: Session = Depends(get_db),
-):
-    """Associate a tag with a task."""
-    result = crud.add_tag_to_task(db, task_id, tag_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Task or Tag not found")
-    return result
+    request: Request, task: OwnedTask, tag_id: ResourceID, user: CurrentUser, db: Database
+) -> models.Task:
+    return crud.set_task_tag(db, task, tag_id, owner_id=user.id, attached=True)
 
 
 @app.delete(
@@ -693,21 +771,15 @@ def assign_tag_to_task(
 )
 @limiter.limit("30/minute")
 def remove_tag_from_task(
-    request: Request,
-    task_id: int,
-    tag_id: int,
-    db: Session = Depends(get_db),
-):
-    """Disassociate a tag from a task."""
-    result = crud.remove_tag_from_task(db, task_id, tag_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Task or Tag not found")
-    return result
+    request: Request, task: OwnedTask, tag_id: ResourceID, user: CurrentUser, db: Database
+) -> models.Task:
+    return crud.set_task_tag(db, task, tag_id, owner_id=user.id, attached=False)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ANALYTICS & STATS ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 @app.get(
     "/analytics/overview",
@@ -715,9 +787,10 @@ def remove_tag_from_task(
     tags=["Analytics"],
 )
 @limiter.limit("60/minute")
-def get_analytics_overview(request: Request, db: Session = Depends(get_db)):
-    """Global system-wide task management analytics, KPIs and completion rates."""
-    return crud.get_analytics_overview(db)
+def get_analytics_overview(
+    request: Request, user: CurrentUser, db: Database
+) -> schemas.AnalyticsOverviewResponse:
+    return crud.get_analytics_overview(db, owner_id=user.id)
 
 
 @app.get(
@@ -727,20 +800,15 @@ def get_analytics_overview(request: Request, db: Session = Depends(get_db)):
 )
 @limiter.limit("60/minute")
 def get_project_stats(
-    request: Request,
-    project_id: int,
-    db: Session = Depends(get_db),
-):
-    """Project-specific metrics, breakdown by status, and completion rate."""
-    stats = crud.get_project_stats(db, project_id)
-    if not stats:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return stats
+    request: Request, project: OwnedProject, db: Database
+) -> schemas.ProjectStatsResponse:
+    return crud.get_project_stats(db, project)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PROJECT EXPORT ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 @app.get(
     "/projects/{project_id}/export/csv",
@@ -749,34 +817,10 @@ def get_project_stats(
 )
 @limiter.limit("20/minute")
 def export_project_tasks_csv(
-    request: Request,
-    project_id: int,
-    db: Session = Depends(get_db),
-):
-    """Generate and download a CSV file of all tasks in a project."""
-    import csv
-    import io
-
-    project = crud.get_project(db, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["ID", "Title", "Status", "Priority", "Due Date", "Created At", "Description"])
-
-    for task in project.tasks:
-        s_val = task.status.value if hasattr(task.status, "value") else str(task.status)
-        p_val = task.priority.value if hasattr(task.priority, "value") else str(task.priority)
-        due = task.due_date.isoformat() if task.due_date else ""
-        created = task.created_at.isoformat() if task.created_at else ""
-        writer.writerow([task.id, task.title, s_val, p_val, due, created, task.description])
-
-    csv_data = output.getvalue()
-    filename = f"project_{project_id}_tasks.csv"
-
-    return Response(
-        content=csv_data,
+    request: Request, project: OwnedProject, db: Database
+) -> StreamingResponse:
+    return StreamingResponse(
+        crud.stream_project_csv(db, project.id),
         media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        headers={"Content-Disposition": f"attachment; filename=project_{project.id}_tasks.csv"},
     )

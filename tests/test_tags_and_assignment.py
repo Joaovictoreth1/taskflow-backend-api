@@ -1,20 +1,27 @@
 """Integration tests for Task Assignment, Tags (Many-to-Many), and /tasks/my-tasks."""
 
-from tests.conftest import client
+from tests.conftest import authenticated_client as client
+from tests.conftest import client as anonymous_client
 
 
 def _create_user_and_login(username="dev_member", email="dev@domain.com", password="Password123"):
-    reg = client.post("/auth/register", json={
-        "username": username,
-        "email": email,
-        "password": password,
-    })
+    reg = client.post(
+        "/auth/register",
+        json={
+            "username": username,
+            "email": email,
+            "password": password,
+        },
+    )
     assert reg.status_code == 201
 
-    login = client.post("/auth/login", json={
-        "username": username,
-        "password": password,
-    })
+    login = client.post(
+        "/auth/login",
+        json={
+            "username": username,
+            "password": password,
+        },
+    )
     assert login.status_code == 200
     token = login.json()["access_token"]
     user_id = reg.json()["id"]
@@ -25,8 +32,8 @@ def _create_user_and_login(username="dev_member", email="dev@domain.com", passwo
 # TAGS CRUD TESTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-class TestTags:
 
+class TestTags:
     def test_create_tag_success(self):
         resp = client.post("/tags", json={"name": "backend", "color": "#0ea5e9"})
         assert resp.status_code == 201
@@ -74,17 +81,20 @@ class TestTags:
 # TASK TAGS ASSOCIATION TESTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-class TestTaskTagsAssociation:
 
+class TestTaskTagsAssociation:
     def test_create_task_with_initial_tags(self):
         t1 = client.post("/tags", json={"name": "bug", "color": "#ef4444"}).json()
         t2 = client.post("/tags", json={"name": "security", "color": "#8b5cf6"}).json()
 
         p = client.post("/projects", json={"name": "Secure Project"}).json()
-        task_resp = client.post(f"/projects/{p['id']}/tasks", json={
-            "title": "Fix SQL injection",
-            "tag_ids": [t1["id"], t2["id"]],
-        })
+        task_resp = client.post(
+            f"/projects/{p['id']}/tasks",
+            json={
+                "title": "Fix SQL injection",
+                "tag_ids": [t1["id"], t2["id"]],
+            },
+        )
         assert task_resp.status_code == 201
         data = task_resp.json()
         assert len(data["tags"]) == 2
@@ -112,10 +122,13 @@ class TestTaskTagsAssociation:
         p = client.post("/projects", json={"name": "Tag Filter Project"}).json()
 
         # Task with tag
-        client.post(f"/projects/{p['id']}/tasks", json={
-            "title": "Server outage",
-            "tag_ids": [t_urgent["id"]],
-        })
+        client.post(
+            f"/projects/{p['id']}/tasks",
+            json={
+                "title": "Server outage",
+                "tag_ids": [t_urgent["id"]],
+            },
+        )
         # Task without tag
         client.post(f"/projects/{p['id']}/tasks", json={"title": "Update logo"})
 
@@ -130,16 +143,19 @@ class TestTaskTagsAssociation:
 # TASK ASSIGNMENT & /tasks/my-tasks TESTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-class TestTaskAssignment:
 
+class TestTaskAssignment:
     def test_create_task_with_assignee(self):
         _, user_id = _create_user_and_login("assignee_user", "assignee@domain.com")
         p = client.post("/projects", json={"name": "Assigned Project"}).json()
 
-        task_resp = client.post(f"/projects/{p['id']}/tasks", json={
-            "title": "Implement feature X",
-            "assignee_id": user_id,
-        })
+        task_resp = client.post(
+            f"/projects/{p['id']}/tasks",
+            json={
+                "title": "Implement feature X",
+                "assignee_id": user_id,
+            },
+        )
         assert task_resp.status_code == 201
         assert task_resp.json()["assignee_id"] == user_id
 
@@ -148,10 +164,13 @@ class TestTaskAssignment:
         _, user2_id = _create_user_and_login("user_two", "u2@domain.com")
 
         p = client.post("/projects", json={"name": "Reassignment Project"}).json()
-        t = client.post(f"/projects/{p['id']}/tasks", json={
-            "title": "Initial task",
-            "assignee_id": user1_id,
-        }).json()
+        t = client.post(
+            f"/projects/{p['id']}/tasks",
+            json={
+                "title": "Initial task",
+                "assignee_id": user1_id,
+            },
+        ).json()
 
         # Reassign to user2
         update_resp = client.patch(f"/tasks/{t['id']}", json={"assignee_id": user2_id})
@@ -163,11 +182,14 @@ class TestTaskAssignment:
         p = client.post("/projects", json={"name": "My Work Project"}).json()
 
         # Task 1 assigned to this user
-        client.post(f"/projects/{p['id']}/tasks", json={
-            "title": "My Task 1",
-            "assignee_id": user_id,
-            "status": "in_progress",
-        })
+        client.post(
+            f"/projects/{p['id']}/tasks",
+            json={
+                "title": "My Task 1",
+                "assignee_id": user_id,
+                "status": "in_progress",
+            },
+        )
         # Task 2 assigned to someone else or unassigned
         client.post(f"/projects/{p['id']}/tasks", json={"title": "Someone Else Task"})
 
@@ -180,17 +202,20 @@ class TestTaskAssignment:
         assert data["items"][0]["assignee_id"] == user_id
 
     def test_list_my_tasks_unauthorized(self):
-        resp = client.get("/tasks/my-tasks")
+        resp = anonymous_client.get("/tasks/my-tasks")
         assert resp.status_code == 401
 
     def test_filter_tasks_by_assignee_id(self):
         _, user_id = _create_user_and_login("filter_assignee", "filter@domain.com")
         p = client.post("/projects", json={"name": "Assignee Filter Project"}).json()
 
-        client.post(f"/projects/{p['id']}/tasks", json={
-            "title": "Target Assigned Task",
-            "assignee_id": user_id,
-        })
+        client.post(
+            f"/projects/{p['id']}/tasks",
+            json={
+                "title": "Target Assigned Task",
+                "assignee_id": user_id,
+            },
+        )
         client.post(f"/projects/{p['id']}/tasks", json={"title": "Unassigned Task"})
 
         resp = client.get(f"/tasks?assignee_id={user_id}")
