@@ -30,8 +30,8 @@ def get_current_user(
     if payload is None:
         raise credentials_exception
 
-    username: str = payload.get("sub")
-    if username is None:
+    username = payload.get("sub")
+    if not isinstance(username, str) or not username:
         raise credentials_exception
 
     user = crud.get_user_by_username(db, username=username)
@@ -56,14 +56,38 @@ def get_optional_user(
     token: Optional[str] = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ) -> Optional[models.User]:
-    """Retrieve authenticated user if token present, otherwise None without failing."""
-    if not token:
+    """Allow anonymous requests, but reject invalid supplied bearer tokens."""
+    if token is None:
         return None
-    payload = decode_access_token(token)
-    if payload is None:
-        return None
-    username = payload.get("sub")
-    if not username:
-        return None
-    return crud.get_user_by_username(db, username=username)
+    return get_current_active_user(get_current_user(token, db))
 
+
+def check_project_writer(project: models.Project, user: models.User | None) -> None:
+    if project.owner_id is None:
+        return
+    if user is None:
+        raise HTTPException(401, "Authentication required", headers={"WWW-Authenticate": "Bearer"})
+    if user.id != project.owner_id and not user.is_superuser:
+        raise HTTPException(403, "Project write access denied")
+
+
+def require_project_write(
+    project_id: int,
+    user: models.User | None = Depends(get_optional_user),
+    db: Session = Depends(get_db),
+) -> None:
+    project = crud.get_project(db, project_id)
+    if project is None:
+        raise HTTPException(404, "Project not found")
+    check_project_writer(project, user)
+
+
+def require_task_write(
+    task_id: int,
+    user: models.User | None = Depends(get_optional_user),
+    db: Session = Depends(get_db),
+) -> None:
+    task = crud.get_task(db, task_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    check_project_writer(task.project, user)

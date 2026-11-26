@@ -2,8 +2,8 @@
 
 from typing import Optional
 from datetime import datetime, timezone
-from sqlalchemy.orm import Session
-from sqlalchemy import or_, func
+from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import or_
 
 from app import models, schemas
 from app.security import hash_password, verify_password
@@ -181,7 +181,9 @@ def get_projects(
     search: Optional[str] = None,
     owner_id: Optional[int] = None,
 ) -> list[models.Project]:
-    query = db.query(models.Project)
+    query = db.query(models.Project).options(
+        selectinload(models.Project.tasks).selectinload(models.Task.tags)
+    ).order_by(models.Project.id)
     if owner_id is not None:
         query = query.filter(models.Project.owner_id == owner_id)
     if search:
@@ -398,9 +400,11 @@ def get_task_comments(db: Session, task_id: int) -> list[models.TaskComment]:
     )
 
 
-def delete_task_comment(db: Session, comment_id: int) -> bool:
-    """Delete a comment by ID."""
-    comment = db.query(models.TaskComment).filter(models.TaskComment.id == comment_id).first()
+def delete_task_comment(db: Session, task_id: int, comment_id: int) -> bool:
+    """Delete a comment only from its parent task."""
+    comment = db.query(models.TaskComment).filter(
+        models.TaskComment.id == comment_id, models.TaskComment.task_id == task_id
+    ).first()
     if not comment:
         return False
     db.delete(comment)
@@ -432,6 +436,14 @@ def get_tag(db: Session, tag_id: int) -> models.Tag | None:
 
 def get_tag_by_name(db: Session, name: str) -> models.Tag | None:
     return db.query(models.Tag).filter(models.Tag.name == name.lower().strip()).first()
+
+
+def tag_used_by_owned_project(db: Session, tag_id: int) -> bool:
+    query = db.query(models.Tag).filter(
+        models.Tag.id == tag_id,
+        models.Tag.tasks.any(models.Task.project.has(models.Project.owner_id.is_not(None))),
+    )
+    return bool(db.query(query.exists()).scalar())
 
 
 def delete_tag(db: Session, tag_id: int) -> bool:

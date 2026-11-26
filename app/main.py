@@ -3,23 +3,23 @@
 from math import ceil
 from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, status
-from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from app.database import engine, get_db, Base
+from app.config import CORS_ALLOWED_ORIGINS
+from app.database import get_db
 from app import crud, schemas, models
-from app.security import create_access_token
+from app.security import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token, verify_password
 from app.dependencies import (
     get_current_active_user,
     get_optional_user,
+    require_project_write,
+    require_task_write,
 )
-
-# ── Create tables ────────────────────────────────────────────────────────────
-Base.metadata.create_all(bind=engine)
 
 # ── Rate Limiter ─────────────────────────────────────────────────────────────
 limiter = Limiter(key_func=get_remote_address)
@@ -51,13 +51,14 @@ app = FastAPI(
 )
 
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+@app.exception_handler(RateLimitExceeded)
+def handle_rate_limit(request: Request, exc: RateLimitExceeded) -> Response:
+    return _rate_limit_exceeded_handler(request, exc)
 
 # ── CORS ─────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -107,39 +108,48 @@ def register_user(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered",
         )
-    return crud.create_user(db, user_in)
+    try:
+        return crud.create_user(db, user_in)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Username or email already registered") from None
+
+
+async def login_credentials(request: Request) -> schemas.UserLogin:
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    try:
+        if content_type == "application/json":
+            return schemas.UserLogin.model_validate(await request.json())
+        if content_type == "application/x-www-form-urlencoded":
+            async with request.form() as fields:
+                return schemas.UserLogin.model_validate(dict(fields))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid username or password fields") from None
+    raise HTTPException(status_code=400, detail="Username and password are required")
 
 
 @app.post(
     "/auth/login",
     response_model=schemas.Token,
     tags=["Authentication"],
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                content_type: {"schema": schemas.UserLogin.model_json_schema()}
+                for content_type in ("application/json", "application/x-www-form-urlencoded")
+            },
+        },
+    },
 )
 @limiter.limit("30/minute")
 def login(
     request: Request,
-    user_login: Optional[schemas.UserLogin] = None,
-    form_data: Optional[OAuth2PasswordRequestForm] = Depends(lambda: None),
+    user_login: schemas.UserLogin = Depends(login_credentials),
     db: Session = Depends(get_db),
 ):
     """Authenticate and receive a JWT Bearer access token."""
-    username = None
-    password = None
-
-    if user_login:
-        username = user_login.username
-        password = user_login.password
-    elif form_data:
-        username = form_data.username
-        password = form_data.password
-
-    if not username or not password:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username and password are required",
-        )
-
-    user = crud.authenticate_user(db, username_or_email=username, password=password)
+    user = crud.authenticate_user(db, user_login.username, user_login.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -156,8 +166,8 @@ def login(
     return schemas.Token(
         access_token=token,
         token_type="bearer",
-        expires_in_minutes=60,
-        user=user,
+        expires_in_minutes=ACCESS_TOKEN_EXPIRE_MINUTES,
+        user=schemas.UserResponse.model_validate(user),
     )
 
 
@@ -212,7 +222,6 @@ def change_password(
     db: Session = Depends(get_db),
 ):
     """Change current authenticated user password."""
-    from app.security import verify_password
     if not verify_password(payload.old_password, current_user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -397,7 +406,7 @@ def get_project(request: Request, project_id: int, db: Session = Depends(get_db)
     return project
 
 
-@app.patch("/projects/{project_id}", response_model=schemas.ProjectResponse, tags=["Projects"])
+@app.patch("/projects/{project_id}", response_model=schemas.ProjectResponse, tags=["Projects"], dependencies=[Depends(require_project_write)])
 @limiter.limit("30/minute")
 def update_project(
     request: Request,
@@ -411,7 +420,7 @@ def update_project(
     return updated
 
 
-@app.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Projects"])
+@app.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Projects"], dependencies=[Depends(require_project_write)])
 @limiter.limit("30/minute")
 def delete_project(request: Request, project_id: int, db: Session = Depends(get_db)):
     if not crud.delete_project(db, project_id):
@@ -427,6 +436,7 @@ def delete_project(request: Request, project_id: int, db: Session = Depends(get_
     response_model=schemas.TaskResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["Tasks"],
+    dependencies=[Depends(require_project_write)],
 )
 @limiter.limit("30/minute")
 def create_task(
@@ -435,6 +445,8 @@ def create_task(
     task: schemas.TaskCreate,
     db: Session = Depends(get_db),
 ):
+    if task.assignee_id is not None and crud.get_user(db, task.assignee_id) is None:
+        raise HTTPException(status_code=422, detail="Assignee does not exist")
     result = crud.create_task(db, project_id, task)
     if result is None:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -542,7 +554,7 @@ def get_task(request: Request, task_id: int, db: Session = Depends(get_db)):
     return task
 
 
-@app.patch("/tasks/{task_id}", response_model=schemas.TaskResponse, tags=["Tasks"])
+@app.patch("/tasks/{task_id}", response_model=schemas.TaskResponse, tags=["Tasks"], dependencies=[Depends(require_task_write)])
 @limiter.limit("30/minute")
 def update_task(
     request: Request,
@@ -550,13 +562,15 @@ def update_task(
     task: schemas.TaskUpdate,
     db: Session = Depends(get_db),
 ):
+    if task.assignee_id is not None and crud.get_user(db, task.assignee_id) is None:
+        raise HTTPException(status_code=422, detail="Assignee does not exist")
     updated = crud.update_task(db, task_id, task)
     if not updated:
         raise HTTPException(status_code=404, detail="Task not found")
     return updated
 
 
-@app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Tasks"])
+@app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Tasks"], dependencies=[Depends(require_task_write)])
 @limiter.limit("30/minute")
 def delete_task(request: Request, task_id: int, db: Session = Depends(get_db)):
     if not crud.delete_task(db, task_id):
@@ -609,6 +623,7 @@ def list_comments(
     "/tasks/{task_id}/comments/{comment_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     tags=["Task Comments"],
+    dependencies=[Depends(require_task_write)],
 )
 @limiter.limit("30/minute")
 def delete_comment(
@@ -618,7 +633,7 @@ def delete_comment(
     db: Session = Depends(get_db),
 ):
     """Delete a comment from a task."""
-    if not crud.delete_task_comment(db, comment_id):
+    if not crud.delete_task_comment(db, task_id, comment_id):
         raise HTTPException(status_code=404, detail="Comment not found")
 
 
@@ -663,6 +678,8 @@ def list_tags(request: Request, db: Session = Depends(get_db)):
 @limiter.limit("30/minute")
 def delete_tag(request: Request, tag_id: int, db: Session = Depends(get_db)):
     """Delete a tag globally."""
+    if crud.tag_used_by_owned_project(db, tag_id):
+        raise HTTPException(status_code=409, detail="Unassign this tag from owned projects before deleting it")
     if not crud.delete_tag(db, tag_id):
         raise HTTPException(status_code=404, detail="Tag not found")
 
@@ -671,6 +688,7 @@ def delete_tag(request: Request, tag_id: int, db: Session = Depends(get_db)):
     "/tasks/{task_id}/tags/{tag_id}",
     response_model=schemas.TaskResponse,
     tags=["Tags"],
+    dependencies=[Depends(require_task_write)],
 )
 @limiter.limit("30/minute")
 def assign_tag_to_task(
@@ -690,6 +708,7 @@ def assign_tag_to_task(
     "/tasks/{task_id}/tags/{tag_id}",
     response_model=schemas.TaskResponse,
     tags=["Tags"],
+    dependencies=[Depends(require_task_write)],
 )
 @limiter.limit("30/minute")
 def remove_tag_from_task(

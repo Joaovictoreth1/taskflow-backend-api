@@ -1,10 +1,12 @@
 """SQLAlchemy ORM models."""
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from sqlalchemy import (
     Column, Integer, String, Text, ForeignKey, DateTime, Boolean, Table, Enum as SAEnum
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import Mapped, relationship
 import enum
 
 from app.database import Base
@@ -33,12 +35,12 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(50), unique=True, nullable=False, index=True)
     email = Column(String(255), unique=True, nullable=False, index=True)
-    hashed_password = Column(String(255), nullable=False)
-    is_active = Column(Boolean, default=True, nullable=False)
-    is_superuser = Column(Boolean, default=False, nullable=False)
+    hashed_password: Mapped[str] = Column(String(255), nullable=False)
+    is_active: Mapped[bool] = Column(Boolean, default=True, nullable=False)
+    is_superuser: Mapped[bool] = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-    projects = relationship(
+    projects: Mapped[list[Project]] = relationship(
         "Project", back_populates="owner", cascade="all, delete-orphan"
     )
 
@@ -56,7 +58,7 @@ class Student(Base):
     email = Column(String(255), unique=True, nullable=False, index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-    profile = relationship(
+    profile: Mapped[Profile | None] = relationship(
         "Profile", back_populates="student", uselist=False, cascade="all, delete-orphan"
     )
 
@@ -74,7 +76,7 @@ class Profile(Base):
     bio = Column(Text, default="")
     avatar_url = Column(String(500), default="")
 
-    student = relationship("Student", back_populates="profile")
+    student: Mapped[Student] = relationship("Student", back_populates="profile")
 
     def __repr__(self) -> str:
         return f"<Profile(id={self.id}, student_id={self.student_id})>"
@@ -93,8 +95,8 @@ class Project(Base):
     )
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-    owner = relationship("User", back_populates="projects")
-    tasks = relationship(
+    owner: Mapped[User | None] = relationship("User", back_populates="projects")
+    tasks: Mapped[list[Task]] = relationship(
         "Task", back_populates="project", cascade="all, delete-orphan"
     )
 
@@ -119,7 +121,7 @@ class Tag(Base):
     name = Column(String(50), unique=True, nullable=False, index=True)
     color = Column(String(7), default="#0ea5e9", nullable=False)
 
-    tasks = relationship("Task", secondary=task_tags, back_populates="tags")
+    tasks: Mapped[list[Task]] = relationship("Task", secondary=task_tags, back_populates="tags")
 
     def __repr__(self) -> str:
         return f"<Tag(id={self.id}, name='{self.name}', color='{self.color}')>"
@@ -137,13 +139,13 @@ class Task(Base):
     )
     title = Column(String(300), nullable=False)
     description = Column(Text, default="")
-    status = Column(
+    status: Mapped[TaskStatus] = Column(
         SAEnum(TaskStatus, values_callable=lambda x: [e.value for e in x]),
         default=TaskStatus.TODO,
         nullable=False,
         index=True,
     )
-    priority = Column(
+    priority: Mapped[TaskPriority] = Column(
         SAEnum(TaskPriority, values_callable=lambda x: [e.value for e in x]),
         default=TaskPriority.MEDIUM,
         nullable=False,
@@ -152,10 +154,10 @@ class Task(Base):
     due_date = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-    project = relationship("Project", back_populates="tasks")
-    assignee = relationship("User", foreign_keys=[assignee_id])
-    tags = relationship("Tag", secondary=task_tags, back_populates="tasks")
-    comments = relationship(
+    project: Mapped[Project] = relationship("Project", back_populates="tasks")
+    assignee: Mapped[User | None] = relationship("User", foreign_keys=[assignee_id])
+    tags: Mapped[list[Tag]] = relationship("Tag", secondary=task_tags, back_populates="tasks")
+    comments: Mapped[list[TaskComment]] = relationship(
         "TaskComment", back_populates="task", cascade="all, delete-orphan"
     )
 
@@ -182,8 +184,8 @@ class TaskComment(Base):
     content = Column(Text, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-    task = relationship("Task", back_populates="comments")
-    user = relationship("User")
+    task: Mapped[Task] = relationship("Task", back_populates="comments")
+    user: Mapped[User | None] = relationship("User")
 
     def __repr__(self) -> str:
         return f"<TaskComment(id={self.id}, task_id={self.task_id}, author='{self.author_name}')>"
