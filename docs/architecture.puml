@@ -1,0 +1,27 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+!pragma layout smetana
+LAYOUT_LEFT_RIGHT()
+title TaskFlow API — containers and API components
+
+Person(client, "API client", "Uses the API from a browser, Swagger UI, or an integration")
+
+System_Boundary(taskflow, "TaskFlow") {
+  Container_Boundary(api, "FastAPI container") {
+    Component(routes, "HTTP routes", "FastAPI · Pydantic · SlowAPI", "Validates requests, manages tasks and projects, and generates CSV and analytics")
+    Component(auth, "Authentication", "JWT · bcrypt", "Signs access tokens, checks passwords and enforces project write permissions")
+    Component(persistence, "Persistence", "SQLAlchemy", "Runs queries and manages transactions")
+  }
+  Container(migrations, "Schema migration", "Alembic", "Upgrades the database before startup")
+  ContainerDb(database, "TaskFlow database", "PostgreSQL or SQLite", "Users, projects, tasks, tags, comments, students and profiles")
+}
+
+Rel(client, routes, "Calls", "HTTP / JSON")
+Rel(routes, auth, "Authenticates and authorizes")
+Rel(routes, persistence, "Reads and writes")
+Rel(auth, persistence, "Looks up users")
+Rel(persistence, database, "Queries")
+Rel(migrations, database, "Applies schema migrations")
+@enduml
