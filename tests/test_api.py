@@ -1,13 +1,5 @@
 """Comprehensive API tests with pytest and TestClient."""
 
-import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-from app.database import Base, get_db
-from app.main import app
-
 from tests.conftest import client
 
 
@@ -324,4 +316,3 @@ class TestTasks:
         data = response.json()
         assert len(data["tasks"]) == 1
         assert data["tasks"][0]["title"] == "Nested task"
-
