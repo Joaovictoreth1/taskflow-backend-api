@@ -1,48 +1,63 @@
+x-app: &app
+  image: taskflow-api:local
+  build:
+    context: .
+    args:
+      PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim}
+  environment:
+    APP_ENV: production
+    DATABASE_URL: ${COMPOSE_DATABASE_URL:?Set COMPOSE_DATABASE_URL}
+    SECRET_KEY: ${SECRET_KEY:?Set a random SECRET_KEY}
+    ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+    MAX_REQUEST_BODY_BYTES: ${MAX_REQUEST_BODY_BYTES:-65536}
+    CORS_ORIGINS: ${CORS_ORIGINS:-[]}
+    FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+    RATE_LIMIT_STORAGE_URI: redis://redis:6379/0
+
 services:
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: taskflow-api
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    environment:
-      - DATABASE_URL=postgresql://taskflow_user:taskflow_pass@db:5432/taskflow_db
-      - SECRET_KEY=taskflow-super-secure-production-key-change-me
-      - ALGORITHM=HS256
-      - ACCESS_TOKEN_EXPIRE_MINUTES=60
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    healthcheck:
+      disable: true
     depends_on:
       db:
         condition: service_healthy
-    networks:
-      - taskflow-network
+
+  api:
+    <<: *app
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
 
   db:
-    image: postgres:16-alpine
-    container_name: taskflow-postgres
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
     restart: unless-stopped
     environment:
-      - POSTGRES_USER=taskflow_user
-      - POSTGRES_PASSWORD=taskflow_pass
-      - POSTGRES_DB=taskflow_db
-    ports:
-      - "5433:5432"
+      POSTGRES_USER: taskflow
+      POSTGRES_DB: taskflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U taskflow_user -d taskflow_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - taskflow-network
+      test: ["CMD-SHELL", "pg_isready -U taskflow -d taskflow"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
 
 volumes:
   postgres_data:
-    driver: local
-
-networks:
-  taskflow-network:
-    driver: bridge
-
