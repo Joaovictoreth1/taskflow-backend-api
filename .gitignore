@@ -36,4 +36,8 @@ htmlcov/
 .coverage
 .coverage.*
 .pytest_cache/
-
+.ruff_cache/
+.mypy_cache/
+node_modules/
+.env.*
+!.env.example

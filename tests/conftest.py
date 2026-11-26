@@ -1,13 +1,19 @@
 """Pytest configuration and shared fixtures for TaskFlow API."""
 
+import os
+import secrets
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.database import Base, get_db
-from app.main import app
+os.environ["SECRET_KEY"] = secrets.token_urlsafe(48)
+os.environ["DATABASE_URL"] = "sqlite://"
+
+from app.database import Base, get_db  # noqa: E402
+from app.main import app  # noqa: E402
 
 # Shared test database
 TEST_DB_URL = "sqlite:///:memory:"

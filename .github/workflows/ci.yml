@@ -1,31 +1,42 @@
-name: CI — Lint & Test
+name: CI
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+on: [push, pull_request]
+
+permissions:
+  contents: read
 
 jobs:
-  test:
+  checks:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12"]
-
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install dependencies
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: python -m pip install -r requirements-dev.txt
+      - run: ruff check app tests alembic seed.py
+      - run: mypy app
+      - run: python -m pytest -q
+      - name: Check SQLite migrations
+        env:
+          DATABASE_URL: sqlite:////tmp/taskflow-ci.db
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run tests
-        run: pytest tests/ -v --tb=short
-
+          alembic upgrade head
+          alembic check
+      - name: Build and smoke test Docker Compose with PostgreSQL
+        run: |
+          export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+          export SECRET_KEY="$(openssl rand -hex 32)"
+          export DATABASE_URL="postgresql+psycopg://taskflow_user:${POSTGRES_PASSWORD}@db:5432/taskflow_db"
+          docker compose up --detach --build --wait
+          curl --fail --silent --show-error http://127.0.0.1:8000/health
+          curl --fail --silent --show-error http://127.0.0.1:8000/projects
+      - name: Tear down smoke stack
+        if: always()
+        run: docker compose down --volumes
+        env:
+          DATABASE_URL: postgresql+psycopg://not-used@db/taskflow_db
+          POSTGRES_PASSWORD: not-used
+          SECRET_KEY: not-used

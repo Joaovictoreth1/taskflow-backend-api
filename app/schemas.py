@@ -1,11 +1,28 @@
 """Pydantic v2 schemas with strict validation."""
 
 from datetime import datetime
-from typing import Optional, Generic, TypeVar
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from typing import Annotated, Optional, Generic, TypeVar
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, field_validator
 import re
 
+from app.security import PASSWORD_MAX_BYTES
+
 T = TypeVar("T")
+
+
+def check_bcrypt_length(password: str) -> str:
+    if len(password.encode()) > PASSWORD_MAX_BYTES:
+        raise ValueError(f"Password cannot exceed {PASSWORD_MAX_BYTES} UTF-8 bytes")
+    return password
+
+
+NewPassword = Annotated[str, Field(min_length=6), AfterValidator(check_bcrypt_length)]
+
+
+def require_non_null(value: str | None) -> str:
+    if value is None:
+        raise ValueError("Field cannot be null")
+    return value
 
 
 # ── Generic Pagination Envelope ──────────────────────────────────────────────
@@ -44,12 +61,12 @@ class UserBase(BaseModel):
 
 
 class UserCreate(UserBase):
-    password: str = Field(..., min_length=6, max_length=128)
+    password: NewPassword
 
 
 class UserUpdate(BaseModel):
     email: Optional[str] = Field(default=None, max_length=255)
-    password: Optional[str] = Field(default=None, min_length=6, max_length=128)
+    password: NewPassword | None = None
     is_active: Optional[bool] = None
 
     @field_validator("email")
@@ -73,8 +90,8 @@ class UserResponse(UserBase):
 
 
 class UserLogin(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=72)
 
 
 class Token(BaseModel):
@@ -226,6 +243,8 @@ class TaskUpdate(BaseModel):
     due_date: Optional[datetime] = None
     assignee_id: Optional[int] = None
 
+    _required = field_validator("title", "description", "status", "priority")(require_non_null)
+
     @field_validator("status")
     @classmethod
     def validate_status(cls, v: Optional[str]) -> Optional[str]:
@@ -271,6 +290,8 @@ class ProjectUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     description: Optional[str] = Field(default=None, max_length=5000)
 
+    _required = field_validator("name", "description")(require_non_null)
+
 
 class ProjectResponse(ProjectBase):
     model_config = ConfigDict(from_attributes=True)
@@ -284,7 +305,7 @@ class ProjectResponse(ProjectBase):
 # ── Task Comment Schemas ─────────────────────────────────────────────────────
 
 class TaskCommentCreate(BaseModel):
-    content: str = Field(..., min_length=1, max_length=2000)
+    content: Annotated[str, StringConstraints(min_length=1, max_length=2000, strip_whitespace=True)]
 
 
 class TaskCommentResponse(BaseModel):
@@ -302,7 +323,7 @@ class TaskCommentResponse(BaseModel):
 
 class ChangePasswordRequest(BaseModel):
     old_password: str = Field(..., min_length=1)
-    new_password: str = Field(..., min_length=6, max_length=128)
+    new_password: NewPassword
 
 
 class UpdateProfileRequest(BaseModel):

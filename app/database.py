@@ -1,10 +1,9 @@
 """Database configuration and session management."""
 
-import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./taskflow.db")
+from app.config import DATABASE_URL
 
 # Handle SQLite-specific connect args
 connect_args = {}
@@ -23,4 +22,3 @@ def get_db():
         yield db
     finally:
         db.close()
-
